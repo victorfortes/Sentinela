@@ -16,7 +16,9 @@ from .conectores.datajud import ConectorDataJud
 from .http import ErroFonte
 
 RANK = {"descartada": 1, "inconclusiva": 2, "provavel": 3, "confirmada": 4}
-ESTADO_AUTO = {"confirmada": "automatico", "provavel": "pendente", "inconclusiva": "pendente", "descartada": "descartado_auto"}
+# Não existe fila humana: o que não é certo fica "em_verificacao" e o próprio sistema o resolve (resolucao.py) por corroboração.
+ESTADO_AUTO = {"confirmada": "automatico", "provavel": "em_verificacao", "inconclusiva": "em_verificacao", "descartada": "descartado_auto"}
+ESTADOS_AUTOMATICOS = {"automatico", "em_verificacao", "pendente", "descartado_auto"}   # tudo que NÃO foi decidido por uma pessoa
 CHUNK_DIAS = 3
 LOTE_DATAJUD = 50
 NOME_MIN_CARACTERES = 4      # nome mais curto que isso (ex.: "NB") não é pesquisado por nome: devolve milhares de homônimos e a fonte recusa
@@ -234,7 +236,7 @@ class Motor:
                                  "djen", ESTADO_AUTO[m["classificacao"]], agora, agora))
                     cont["novas"] += 1
                     _radar.evento(con, pid, "PROCESS_FIRST_SEEN", c["id"], fonte_label, "primeiro registro deste processo para o cliente (%s)" % m["classificacao"])
-                elif ex["estado_validacao"] in ESTADO_AUTO.values() and (
+                elif ex["estado_validacao"] in ESTADOS_AUTOMATICOS and (
                         RANK[m["classificacao"]] > RANK[ex["classificacao"]]
                         or ("numeroProcesso:" in (ex["evidencia"] or "") and not r["q"]["chave"].startswith("numeroProcesso:")
                             and RANK[m["classificacao"]] >= RANK[ex["classificacao"]])):   # a pesquisa passa a ser a origem do registro
@@ -262,7 +264,7 @@ class Motor:
         for r in con.execute("SELECT c.id,c.cliente_id,c.classificacao,c.estado_validacao,m.* FROM correspondencias c "
                              "JOIN comunicacoes m ON m.id=c.comunicacao_id").fetchall():
             res["avaliadas"] += 1
-            if r["estado_validacao"] not in ESTADO_AUTO.values():
+            if r["estado_validacao"] not in ESTADOS_AUTOMATICOS:
                 continue
             com = {"texto": r["texto"] or "", "destinatarios": json.loads(r["destinatarios"] or "[]")}
             m = matcher.avaliar(_clientes.carregar(con, r["cliente_id"]), com)

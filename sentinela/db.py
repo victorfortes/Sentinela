@@ -321,6 +321,11 @@ MIGRACOES = [
         verificado_em TEXT NOT NULL
     );
     """),
+    ("0012_sem_fila_humana", """
+    ALTER TABLE correspondencias ADD COLUMN resolvida_em TEXT;
+    ALTER TABLE controle_processos ADD COLUMN origem TEXT NOT NULL DEFAULT 'manual';
+    UPDATE correspondencias SET estado_validacao='em_verificacao' WHERE estado_validacao='pendente';
+    """),
 ]
 
 

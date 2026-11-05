@@ -29,22 +29,24 @@ def montar(con: sqlite3.Connection, correspondencia_id: int, tipo: str) -> Dict:
             "valor_causa": valor, "sintese": an["resumo"] if an else "Análise ainda não gerada.",
             "link_oficial": (com["link"] if com and com["link"] else "https://portaldeservicos.pdpj.jus.br/consulta"),
             "prioridade": r["prioridade"] or "não classificada",
-            "estado_validacao": {"automatico": "confirmada automaticamente", "pendente": "pendente de conferência",
-                                 "confirmado_manual": "confirmada manualmente"}.get(r["estado_validacao"], r["estado_validacao"]),
+            "confianca": r["confianca"],
+            "estado_validacao": {"automatico": "decidido automaticamente", "em_verificacao": "o sistema continua verificando sozinho",
+                                 "pendente": "o sistema continua verificando sozinho", "confirmado_manual": "corrigido manualmente"
+                                 }.get(r["estado_validacao"], r["estado_validacao"]),
             "classificacao": r["classificacao"], "categoria_data": r["categoria_data"], "correspondencia_id": correspondencia_id}
 
 
 def texto(a: Dict) -> (str, str):
     if a["tipo"] == "falha_consulta":
         return "NGA Sentinela: falha nas consultas", a["detalhe"]
-    cab = "NOVA AÇÃO CONTRA CLIENTE" if a["definitivo"] else "POSSÍVEL NOVA AÇÃO (CONFERIR)"
+    cab = "NOVA AÇÃO CONTRA CLIENTE" if a["definitivo"] else "POSSÍVEL NOVA AÇÃO"
     if a.get("data_distribuicao") == datetime.now().date().isoformat():
         cab = "AJUIZADA HOJE — " + cab
     corpo = "\n".join("%s: %s" % (k, v) for k, v in [
         ("Cliente", a["cliente"]), ("Processo", a["numero_processo"]), ("Tribunal", a["tribunal"]),
         ("Distribuição", a["data_distribuicao"] or "não verificada"), ("Natureza", a["natureza"] or "não informada"),
         ("Valor da causa", a["valor_causa"] if a["valor_causa"] else "não disponível"), ("Prioridade", a["prioridade"]),
-        ("Validação", a["estado_validacao"]), ("Síntese", a["sintese"]), ("Consulta oficial", a["link_oficial"])])
+        ("Confiança", "%s%%" % a["confianca"] if a.get("confianca") is not None else "n/d"), ("Situação", a["estado_validacao"]), ("Síntese", a["sintese"]), ("Consulta oficial", a["link_oficial"])])
     return "NGA Sentinela — %s: %s" % (cab, a["cliente"]), corpo
 
 
@@ -101,17 +103,21 @@ def emitir(con: sqlite3.Connection, a: Dict, ref: str, enviar_email: Callable = 
 
 
 def processar_pendentes(con: sqlite3.Connection, **kw) -> Dict[str, int]:
-    """Gera alertas para correspondências recentes. Processos antigos achados agora e descartados não alertam."""
-    cont = {"definitivos": 0, "conferencia": 0, "duplicados": 0, "falhas_envio": 0}
-    minimo = _config.obter(con, "radar")["confianca_revisao"]
-    rows = con.execute("SELECT id,classificacao,estado_validacao FROM correspondencias WHERE classificacao!='descartada' "
-                       "AND categoria_data!='processo_antigo' AND (confianca IS NULL OR confianca>=?)", (minimo,)).fetchall()
+    """Alertas por CONFIANÇA, sem tarefa humana: >= limiar automático => 'nova ação confirmada'; entre o limiar de revisão e o automático =>
+    'possível nova ação' (informativo; o sistema segue verificando sozinho); abaixo disso, nenhum alerta. Processo antigo achado agora não alerta."""
+    cont = {"definitivos": 0, "conferencia": 0, "possiveis": 0, "duplicados": 0, "falhas_envio": 0}
+    rc = _config.obter(con, "radar")
+    rows = con.execute("SELECT id,classificacao,confianca,categoria_data FROM correspondencias WHERE classificacao!='descartada' "
+                       "AND categoria_data!='processo_antigo' AND estado_validacao NOT IN ('descartado_auto','descartado_manual')").fetchall()
     for r in rows:
-        definitivo = r["classificacao"] == "confirmada" and con.execute(
-            "SELECT categoria_data FROM correspondencias WHERE id=?", (r["id"],)).fetchone()[0] == "nova_distribuicao"
-        tipo = "nova_acao_confirmada" if definitivo else "conferencia_pendente"
-        if tipo == "conferencia_pendente" and r["estado_validacao"] not in ("pendente", "automatico"):
+        conf = r["confianca"] if r["confianca"] is not None else (100 if r["classificacao"] == "confirmada" else 60)
+        if conf >= rc["confianca_auto"] and r["categoria_data"] == "nova_distribuicao":
+            tipo = "nova_acao_confirmada"
+        elif conf >= rc["confianca_revisao"]:
+            tipo = "nova_acao_possivel"
+        else:
             continue
+        definitivo = tipo == "nova_acao_confirmada"
         res = emitir(con, montar(con, r["id"], tipo), str(r["id"]), **kw)
         for st in res.values():
             if st == "duplicado_ignorado":
@@ -119,7 +125,9 @@ def processar_pendentes(con: sqlite3.Connection, **kw) -> Dict[str, int]:
             elif st == "falha":
                 cont["falhas_envio"] += 1
             else:
-                cont["definitivos" if definitivo else "conferencia"] += 1
+                cont["definitivos" if definitivo else "possiveis"] += 1
+                if not definitivo:
+                    cont["conferencia"] += 1   # nome antigo da chave, mantido por compatibilidade
     return cont
 
 

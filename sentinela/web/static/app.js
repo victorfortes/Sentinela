@@ -46,7 +46,7 @@ function renderLogin(erro) {
 }
 
 /* ---------- estrutura ---------- */
-const MENU = [["dashboard", "Dashboard"], ["clientes", "Clientes"], ["processos", "Novos processos"], ["cobertura", "Garantia de cobertura"], ["validacao", "Central de validação"], ["fontes", "Monitoramento de fontes"], ["config", "Configurações"]];
+const MENU = [["dashboard", "Dashboard"], ["clientes", "Clientes"], ["processos", "Novos processos"], ["cobertura", "Fontes e cobertura"], ["config", "Configurações"]];
 let _topoTimer = null;
 function moldura(ativo, html) {
   const nome = (MENU.find((m) => m[0] === ativo) || ["", "Processo"])[1];
@@ -115,10 +115,10 @@ async function pgDashboard() {
       : `<p class="mudo">Nenhum cliente ativo. Cadastre em “Clientes”.</p>`;
     const fazer = [];
     if (nHoje) fazer.push(["urgente", `Veja as ${nHoje} ação(ões) ajuizada(s) hoje`, "Abra a lista, leia a ação e atribua a um advogado.", "#/processos", "ver_hoje"]);
-    if (d.pendentes_validacao) fazer.push(["atencao", `${d.pendentes_validacao} caso(s) esperam sua conferência`, "O sistema não teve certeza; confirme ou descarte.", "#/validacao"]);
+    if (d.em_verificacao) fazer.push(["info", `${d.em_verificacao} possível(is) ação(ões) em verificação automática`, "Nenhuma ação sua é necessária: o sistema confirma ou descarta sozinho conforme novas publicações aparecem.", ""]);
     if (d.consultas_a_reprocessar) fazer.push(["info", "Algumas consultas falharam", "O sistema tenta de novo sozinho a cada 30 minutos. Nada a fazer.", ""]);
     (d.clientes_so_cnpj || []).forEach((c) => fazer.push(["info", `${c.razao_social}: nome curto demais`, "Pesquisado só pelo CNPJ (pelo nome viria milhares de homônimos). Cadastre o nome completo ou alternativos para ampliar.", ""]));
-    if (!d.cobertura.completa) fazer.push(["atencao", "Cobertura do monitoramento incompleta", d.cobertura.resumo + ". Veja detalhes em “Garantia de cobertura”.", "#/cobertura"]);
+    if (!d.cobertura.completa) fazer.push(["atencao", "Cobertura do monitoramento incompleta", d.cobertura.resumo + ". Detalhes em “Fontes e cobertura” (nada a fazer: é automático).", "#/cobertura"]);
     if (!w.ativo) fazer.push(["urgente", "O robô de pesquisa está parado", "Nenhuma pesquisa automática ocorre até ele voltar (Mac desligado ou reiniciado).", "#/fontes"]);
     if (!fazer.length) fazer.push(["ok", "Nada pendente para você agora", "Quando algo precisar de atenção, aparece aqui.", ""]);
     const onde = d.estado_pesquisa.codigo, cobOk = d.cobertura.completa;
@@ -142,7 +142,7 @@ async function pgDashboard() {
         <li><b>Barra laranja / faixa “Agora”</b>: ações ajuizadas hoje, que o advogado precisa ver.</li>
         <li><b>Semáforo</b>: verde = pesquisando normalmente; amarelo = falhas que serão refeitas; vermelho = parado.</li></ul></details>
       <details class="ajuda"><summary>Detalhes técnicos (para o responsável pelo sistema)</summary>
-      <div class="summarygrid">${k(d.clientes_monitorados, "Clientes monitorados")}${k(d.novas_acoes_confirmadas, "Novas ações confirmadas", "confirmadas e ajuizadas recentemente")}${k(d.pendentes_validacao, "Pendentes de validação")}
+      <div class="summarygrid">${k(d.clientes_monitorados, "Clientes monitorados")}${k(d.novas_acoes_confirmadas, "Novas ações confirmadas", "confirmadas e ajuizadas recentemente")}${k(d.em_verificacao, "Em verificação automática", "sem tarefa para ninguém")}
       ${k(d.falhas_consultas_24h, "Falhas de consulta (24 h)")}${k(d.consultas_a_reprocessar, "Consultas a reprocessar")}${k(d.tribunais_com_dados, "Tribunais com dados recebidos")}</div>
       <p class="mudo peq">${esc(d.nota_tribunais)}</p>
       <div class="panel"><div class="lin" style="gap:26px;align-items:flex-start">
@@ -319,7 +319,7 @@ async function pgProcesso(id) {
       ${Object.keys(d.campos_divergentes || {}).length ? `<div class="faixa falha_parcial" style="margin-top:12px"><b>Fontes divergem:</b> ${Object.entries(d.campos_divergentes).map(([k, v]) => esc(k) + ": " + v.map((x) => esc(x.valor) + " (" + esc(x.fonte) + ")").join(" × ")).join(" · ")}. Nada foi sobrescrito.</div>` : ""}
       ${(d.partes || []).length ? `<p class="peq mudo" style="margin:12px 0 0"><b>Partes:</b> ${d.partes.map((x) => esc(x.nome) + " <i>(" + ({ PLAINTIFF: "autor", DEFENDANT: "réu", INTERESTED: "interessado", THIRD_PARTY: "outro", UNKNOWN: "?" }[x.lado] || x.lado) + ")</i>").join(" · ")}</p>` : ""}
       ${(d.eventos || []).length ? `<details class="ajuda" style="margin-top:12px"><summary>Cronologia do processo no Sentinela</summary><ul>${d.eventos.map((x) => `<li><b>${esc(fmtData(x.criado_em))}</b> — ${esc(x.tipo)}${x.fonte ? " [" + esc(x.fonte) + "]" : ""}: ${esc(x.detalhe || "")}</li>`).join("")}</ul></details>` : ""}
-      ${["provavel", "inconclusiva"].includes(d.classificacao) && d.estado_validacao === "pendente" && pode("advogado") ? `<div class="lin" style="margin-top:12px"><button id="conf">Confirmar ação contra o cliente</button><button class="perigo" id="desc">Descartar</button></div>` : ""}</div>
+      ${["provavel", "inconclusiva", "confirmada"].includes(d.classificacao) && d.estado_validacao !== "confirmado_manual" && d.estado_validacao !== "descartado_manual" && pode("advogado") ? `<div class="lin" style="margin-top:12px"><button id="conf">Corrigir: é ação contra o cliente</button><button class="perigo" id="desc">Descartar</button></div>` : ""}</div>
       <div class="cartao"><h3>Análise jurídica</h3>${a ? `<p>${esc(a.resumo)}</p><dl class="dl">${campo("classe", "Classe")}${campo("assunto", "Assunto")}${campo("autor", "Autor")}${campo("reu", "Réu")}${campo("valor_causa", "Valor da causa")}${campo("tutela_provisoria", "Tutela provisória")}${campo("principais_fatos", "Principais fatos")}${campo("fundamentos_juridicos", "Fundamentos")}${campo("pedidos", "Pedidos")}
         <dt>Urgência aparente</dt><dd>${a.urgencia_aparente ? "Sim" : "Não"}</dd><dt>Análise imediata</dt><dd>${a.requer_analise_imediata ? "Recomendada" : "Não indicada"}</dd><dt>Motivos da prioridade</dt><dd>${esc((a.campos._motivos_prioridade?.valor || []).join("; ") || "nenhum critério atingido")}</dd></dl>
         <p class="mudo peq">Gerada em ${fmtData(a.gerada_em)} · modelo: ${esc(a.modelo)} · petição inicial: ${esc(a.documentos.peticao_inicial === "indisponivel_nas_fontes_publicas" ? "indisponível nas fontes públicas" : a.documentos.peticao_inicial)}. Verde = extraído da fonte; amarelo = inferência; cinza = não verificado.</p>` : `<p class="mudo">Análise ainda não gerada.</p>`}</div>
@@ -347,8 +347,8 @@ async function pgCobertura() {
     const vis = n_("capturado") + n_("recuperado") + n_("anterior_ao_historico"), totV = vis + n_("revisar") + n_("invisivel_no_djen");
     const visib = totV ? Math.round(1000 * vis / totV) / 10 : null;
     const faixa = (c) => `<div class="tira">${c.dias.map((x) => `<i class="${esc(x.status)}" title="${esc(fmtDia(x.dia))} — ${esc(COB_ROT[x.status])}"></i>`).join("")}</div>`;
-    moldura("cobertura", hero("PROVA DE COBERTURA", "Estamos lendo <em>tudo?</em>", "Registro, dia a dia, do que foi realmente lido em cada fonte para cada cliente. O que não está provado aparece como lacuna.",
-        pode("advogado") ? `<button id="lac">Preencher lacunas agora</button>` : "") +
+    moldura("cobertura", hero("FONTES E COBERTURA", "Estamos lendo <em>tudo?</em>", "Registro, dia a dia, do que foi realmente lido em cada fonte para cada cliente. O que não está provado aparece como lacuna.",
+        "") +
       `<div class="semaforo ${veredito[0]}"><i></i><span>${esc(veredito[1])}</span></div>
       <div class="summarygrid placar">${[["Lidos e conferidos", t.coberto, "highlight"], ["Ainda sendo relidos", t.provisorio + t.em_curso, ""], ["Lacunas", t.lacuna, t.lacuna ? "ruim" : ""], ["Leituras incompletas", t.incompleto, t.incompleto ? "ruim" : ""]]
         .map(([n, v, c]) => `<article class="${c}"><span>${n}</span><strong>${v}</strong><small>dias de cliente, últimos ${d.dias} dias</small></article>`).join("")}</div>
@@ -364,52 +364,27 @@ async function pgCobertura() {
       <details class="ajuda"><summary>Trilha de auditoria — últimas chamadas às fontes</summary><div class="tabela-rolar" style="margin:0 18px 18px"><table><thead><tr><th>Quando</th><th>Fonte</th><th>Tribunal</th><th>Resultado</th><th>HTTP</th><th>ms</th><th>Resposta (hash)</th></tr></thead><tbody>${ch.map((x) => `<tr><td>${esc(fmtData(x.quando))}</td><td>${esc(x.fonte)}</td><td>${esc(x.tribunal || "—")}</td><td><span class="cres ${x.ok ? "ok" : "alerta"}">${esc(x.codigo)}${x.final ? "" : " (nova tentativa)"}</span></td><td>${esc(x.http_status ?? "—")}</td><td>${esc(x.latencia_ms ?? "—")}</td><td class="peq mudo">${esc(x.hash_resposta || "—")}</td></tr>`).join("")}</tbody></table></div></details>
       <h2>Cadernos do DJEN — prova por tribunal e dia</h2>
       <p class="mudo peq" style="margin:-6px 0 14px">O CNJ publica, por tribunal e por dia, o caderno COMPLETO das comunicações. O Sentinela baixa cada caderno e procura os clientes dentro dele. “Lidas = declaradas” prova que nenhuma comunicação do dia ficou de fora.</p>
-      <div class="panel">${(d.cadernos || []).some((x) => x.cadernos) ? `<div class="tabela-rolar"><table><thead><tr><th>Dia</th><th>Cadernos fechados</th><th>Comunicações lidas / declaradas pelo CNJ</th><th>Achados</th><th>Situação</th></tr></thead><tbody>${d.cadernos.map((x) => `<tr><td>${esc(fmtDia(x.dia))}</td><td>${x.fechados} de ${x.cadernos}</td><td>${x.lidas.toLocaleString("pt-BR")} / ${x.declaradas.toLocaleString("pt-BR")}</td><td>${x.achados}</td><td><span class="cres ${!x.cadernos ? "info" : x.com_erro ? "alerta" : x.pendentes ? "info" : "ok"}">${!x.cadernos ? "ainda não varrido" : x.com_erro ? x.com_erro + " com erro" : x.pendentes ? x.pendentes + " pendente(s)" : "completo"}</span></td></tr>`).join("")}</tbody></table></div>` : `<p class="mudo">Nenhum caderno varrido ainda. ${pode("advogado") ? `<button id="vcad" class="sec">Varrer cadernos agora</button>` : ""}</p>`}</div>
+      <div class="panel">${(d.cadernos || []).some((x) => x.cadernos) ? `<div class="tabela-rolar"><table><thead><tr><th>Dia</th><th>Cadernos fechados</th><th>Comunicações lidas / declaradas pelo CNJ</th><th>Achados</th><th>Situação</th></tr></thead><tbody>${d.cadernos.map((x) => `<tr><td>${esc(fmtDia(x.dia))}</td><td>${x.fechados} de ${x.cadernos}</td><td>${x.lidas.toLocaleString("pt-BR")} / ${x.declaradas.toLocaleString("pt-BR")}</td><td>${x.achados}</td><td><span class="cres ${!x.cadernos ? "info" : x.com_erro ? "alerta" : x.pendentes ? "info" : "ok"}">${!x.cadernos ? "ainda não varrido" : x.com_erro ? x.com_erro + " com erro" : x.pendentes ? x.pendentes + " pendente(s)" : "completo"}</span></td></tr>`).join("")}</tbody></table></div>` : `<p class="mudo">Nenhum caderno varrido ainda: a varredura é automática (06:00 e 18:00).</p>`}</div>
       <h2>Dia a dia por cliente</h2><div class="panel">
         <div class="legenda">${["coberto", "provisorio", "lacuna", "incompleto", "sem_historico"].map((k) => `<span><i class="${k}"></i>${esc(COB_ROT[k])}</span>`).join("")}</div>
         ${d.clientes.map((c) => `<div class="cobcli"><div class="nome"><b>${esc(c.cliente)}</b><small>${c.pct_coberto == null ? "sem histórico ainda" : c.pct_coberto + "% dos dias já conferidos"} · ${c.consultas.length} consulta(s): ${esc(c.consultas.join(" · "))}</small></div>${faixa(c)}</div>`).join("")}
         <p class="mudo peq" style="margin:14px 0 0">Esquerda = mais antigo, direita = hoje. Cada pesquisa diária relê os últimos ${d.rescan_dias} dias, porque o DJEN às vezes publica com atraso.</p></div>
       ${lac.length ? `<h2>Lacunas abertas</h2><div class="panel">${lac.map((g) => `<div class="lin"><b>${esc((d.clientes.find((c) => c.cliente_id === g.cliente_id) || {}).cliente || g.cliente_id)}</b><span class="mudo">${esc(g.chave)}</span><span>${esc(fmtDia(g.ini))} a ${esc(fmtDia(g.fim))}</span></div>`).join("")}<p class="mudo peq" style="margin:10px 0 0">O agendador refaz estas janelas sozinho a cada 30 minutos.</p></div>` : ""}
-      <h2>Teste de captura (processos-controle)</h2>
-      <p class="mudo peq" style="margin:-6px 0 14px">A prova mais forte: cadastre números de processos que vocês SABEM que existem contra o cliente (de outra fonte: carteira, e-mail do cliente, cautelar). O sistema confere se foram capturados. Se algum não foi, ele inclui na hora e mostra aqui como falha.</p>
+      <h2>Canários e medição externa</h2>
+      <p class="mudo peq" style="margin:-6px 0 14px">Ninguém precisa cadastrar nada. O sistema escolhe sozinho processos que já confirmou (os “canários”) e os revisita todo dia: se algum deixar de ser detectado, a fonte ou o leitor regrediu e um alerta técnico é emitido. A lista abaixo marcada “Astrea” foi uma medição externa pontual.</p>
       <div class="panel">
         <div class="lin" style="gap:34px;margin-bottom:14px;flex-wrap:wrap">
           <div><span class="mudo peq">Captura do que o DJEN mostra</span><br><b style="font:600 40px var(--cond);color:var(--amber2)">${recall == null ? "—" : recall + "%"}</b><div class="mudo peq" style="max-width:300px">processos com o cliente nomeado no DJEN que a pesquisa trouxe (${n_("capturado")} de ${baseR})</div></div>
           <div><span class="mudo peq">Visibilidade no DJEN</span><br><b style="font:600 40px var(--cond);color:${visib != null && visib < 70 ? "var(--red)" : "var(--amber2)"}">${visib == null ? "—" : visib + "%"}</b><div class="mudo peq" style="max-width:300px">processos conhecidos em que o DJEN chega a nomear o cliente (${vis} de ${totV}). O restante é invisível a qualquer busca por nome/CNPJ.</div></div>
           <div class="mudo peq" style="max-width:360px">${n_("anterior_ao_historico") ? n_("anterior_ao_historico") + " processo(s) são anteriores ao histórico pesquisado e foram incluídos. " : ""}${n_("fora_da_fonte") ? n_("fora_da_fonte") + " não têm nenhuma comunicação no DJEN." : ""}</div></div>
-        ${ctl.length ? `<div class="tabela-rolar"><table><thead><tr><th>Cliente</th><th>Processo</th><th>Resultado</th><th>Detalhe</th><th></th></tr></thead><tbody>${ctl.map((x) => { const r = CTRL_ROT[x.resultado] || ["Ainda não verificado", "info"]; return `<tr><td>${esc(x.cliente)}</td><td>${esc(x.numero_processo)}</td><td><span class="cres ${r[1]}">${esc(r[0])}</span></td><td class="peq mudo">${esc(x.detalhe || "")}${x.verificado_em ? "<br>" + esc(fmtData(x.verificado_em)) : ""}</td><td>${pode("advogado") ? `<button class="sec" data-del="${x.id}">remover</button>` : ""}</td></tr>`; }).join("")}</tbody></table></div>` : ""}
-        ${pode("advogado") ? `<div class="lin" style="gap:10px;margin-top:14px;flex-wrap:wrap"><select id="ccli">${d.clientes.map((c) => `<option value="${c.cliente_id}">${esc(c.cliente)}</option>`).join("")}</select>
-          <input id="cnum" placeholder="0000000-00.0000.0.00.0000" style="min-width:260px"><button id="cadd">Adicionar</button><button id="cver" class="sec">Verificar agora</button></div>` : ""}</div>
+        ${ctl.length ? `<div class="tabela-rolar"><table><thead><tr><th>Cliente</th><th>Processo</th><th>Resultado</th><th>Detalhe</th><th></th></tr></thead><tbody>${ctl.map((x) => { const r = CTRL_ROT[x.resultado] || ["Ainda não verificado", "info"]; return `<tr><td>${esc(x.cliente)}</td><td>${esc(x.numero_processo)}</td><td><span class="cres ${r[1]}">${esc(r[0])}</span></td><td class="peq mudo">${esc(x.detalhe || "")}${x.verificado_em ? "<br>" + esc(fmtData(x.verificado_em)) : ""}</td><td>${x.origem === "auto" ? "<span class='mudo peq'>automático</span>" : ""}</td></tr>`; }).join("")}</tbody></table></div>` : ""}
+</div>
       <h2>O que isto garante — e o que não garante</h2>
       <div class="panel ajuda-txt"><b>Garante:</b><ul><li>Que cada dia de publicação do DJEN foi lido por inteiro, para cada nome e CNPJ de cada cliente (lidos = total informado pela fonte; nada cortado pelo limite de 10.000).</li><li>Que dias não lidos (computador desligado, fonte fora do ar) aparecem como lacuna e são refeitos sozinhos.</li><li>Que as publicações tardias são pegas: cada pesquisa relê os últimos ${d.rescan_dias} dias.</li></ul>
         <b>Não garante (limites das fontes públicas):</b><ul><li>Processo que ainda não gerou nenhuma comunicação no DJEN (ex.: acabou de ser distribuído e o réu não foi citado) só aparece quando o DJEN publicar algo.</li><li>Tribunais ou processos que não alimentam o DJEN (segredo de justiça, alguns sistemas).</li><li>Cliente com nome muito curto é pesquisado só por CNPJ.</li></ul>
         Por isso existe o teste de captura: ele mede, com processos reais conhecidos, quanto escapa.</div>`);
-    const post = async (tipo, msg) => { try { await api("/jobs", { method: "POST", body: { tipo, params: {} } }); aviso(msg); } catch (e) { aviso(e.message); } };
-    const vc = document.getElementById("vcad"); if (vc) vc.onclick = () => post("varrer_cadernos", "Varredura de cadernos enfileirada (pode levar bastante tempo: são centenas de MB por dia).");
-    const l = document.getElementById("lac"); if (l) l.onclick = () => post("preencher_lacunas", "Preenchimento enfileirado: o worker refaz os dias sem leitura.");
-    const v = document.getElementById("cver"); if (v) v.onclick = async () => { await post("verificar_controle", "Verificação enfileirada. Atualize em instantes."); };
-    const a = document.getElementById("cadd"); if (a) a.onclick = async () => { try { await api("/controle", { method: "POST", body: { cliente_id: +document.getElementById("ccli").value, numero_processo: document.getElementById("cnum").value } }); pgCobertura(); } catch (e) { aviso(e.message); } };
-    document.querySelectorAll("[data-del]").forEach((b) => (b.onclick = async () => { if (confirm("Remover este processo-controle?")) { await api("/controle/" + b.dataset.del, { method: "DELETE" }); pgCobertura(); } }));
   } catch (e) { falhou("cobertura", e); }
 }
-async function pgValidacao() {
-  carregando("validacao");
-  try {
-    const r = await api("/validacao/pendentes?limite=100");
-    moldura("validacao", `<div class="cabeca"><div><h1>Central de validação</h1><div class="mudo peq">${r.total} correspondência(s) aguardando conferência — mostrando ${r.itens.length}</div></div>
-      ${pode("advogado") ? `<div class="lin"><button id="lc">Confirmar selecionadas</button><button class="perigo" id="ld">Descartar selecionadas</button></div>` : ""}</div>
-      <p class="mudo peq">Somente correspondências <b>confirmadas</b> geram alerta definitivo de nova ação. Confira polo, nome e fonte antes de decidir. Decisões em lote exigem justificativa e ficam na auditoria.</p>
-      <div class="tabela-rolar"><table><thead><tr><th></th><th>Processo</th><th>Cliente</th><th>Nome na fonte</th><th>Critério</th><th>Distribuição</th><th></th></tr></thead><tbody>
-      ${r.itens.map((i) => `<tr><td><input type="checkbox" class="sel" value="${i.id}"></td><td><a href="#/processo/${i.id}">${esc(i.numero_processo)}</a><br><span class="peq mudo">${esc(i.tribunal)}</span></td><td>${esc(i.razao_social)}</td>
-      <td>${esc(i.nome_na_fonte || "—")}<br><span class="peq mudo">${i.polo === "P" ? "polo passivo" : i.polo === "A" ? "polo ativo" : "polo desconhecido"}</span></td>
-      <td>${tag(i.classificacao)}<br><span class="peq mudo">nível ${i.nivel}: ${esc(i.evidencia.regra || "")}</span></td><td>${fmtDia(i.data_ajuizamento)}<br>${tag(i.categoria_data)}</td><td><a href="#/processo/${i.id}">abrir</a></td></tr>`).join("") || `<tr><td colspan="7" class="mudo">Nada pendente.</td></tr>`}</tbody></table></div>`);
-    const lote = (dec) => async () => { const ids = [...document.querySelectorAll(".sel:checked")].map((x) => +x.value); if (!ids.length) return aviso("Selecione ao menos uma."); const j = prompt(`Justificativa para ${dec === "confirmada" ? "CONFIRMAR" : "DESCARTAR"} ${ids.length} correspondência(s):`, ""); if (!j || !j.trim()) return;
-      try { const x = await api("/validacao/lote", { method: "POST", body: { ids, decisao: dec, justificativa: j } }); aviso(x.decididas + " decisão(ões) registrada(s)."); pgValidacao(); } catch (e) { aviso(e.message); } };
-    const lc = document.getElementById("lc"); if (lc) { lc.onclick = lote("confirmada"); document.getElementById("ld").onclick = lote("descartada"); }
-  } catch (e) { falhou("validacao", e); }
-}
-
-/* ---------- fontes ---------- */
 async function pgFontes() {
   carregando("fontes");
   try {
@@ -455,7 +430,7 @@ async function rotear() {
   if (!tok()) return renderLogin();
   if (!eu) { try { eu = await api("/eu"); } catch (e) { return renderLogin(); } }
   const [, p, id] = (location.hash || "#/dashboard").split("/");
-  const rotas = { dashboard: pgDashboard, clientes: pgClientes, processos: pgProcessos, cobertura: pgCobertura, validacao: pgValidacao, fontes: pgFontes, config: pgConfig };
+  const rotas = { dashboard: pgDashboard, clientes: pgClientes, processos: pgProcessos, cobertura: pgCobertura, validacao: pgProcessos, fontes: pgCobertura, config: pgConfig };
   if (p === "cliente" && id) return pgCliente(id);
   if (p === "processo" && id) return pgProcesso(id);
   (rotas[p] || pgDashboard)();

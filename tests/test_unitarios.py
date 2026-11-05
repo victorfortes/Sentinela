@@ -271,10 +271,9 @@ class TestValidacaoENome(Base):
         clientes.cadastrar(self.con, "Acme Indústria Ltda", CNPJ_OK)
         m = self.motor(lambda *a: resp({"status": "success", "count": 1, "items": [item(1)]}))
         m.executar(desde=date(2026, 10, 28))
-        p = validacao.pendentes(self.con)
-        self.assertEqual(len(p), 1)
-        validacao.decidir(self.con, p[0]["id"], "dr.victor", "confirmada", "conferido no PJe")
-        self.assertEqual(validacao.pendentes(self.con), [])
+        cid = self.con.execute("SELECT id,estado_validacao FROM correspondencias").fetchone()
+        self.assertEqual(cid["estado_validacao"], "em_verificacao")      # o sistema resolve sozinho; não há fila humana
+        validacao.decidir(self.con, cid["id"], "dr.victor", "confirmada", "conferido no PJe")
         v = self.con.execute("SELECT * FROM validacoes").fetchone()
         self.assertEqual((v["usuario"], v["classificacao_anterior"], v["decisao"]), ("dr.victor", "provavel", "confirmada"))
         # nova execução não rebaixa nem sobrescreve decisão humana

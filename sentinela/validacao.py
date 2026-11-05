@@ -1,18 +1,7 @@
-"""Central de validação: decisão humana sobre correspondências não confirmadas, com trilha de auditoria."""
+"""Correção manual OPCIONAL de um vínculo (não há fila de trabalho): uma pessoa pode sobrepor a decisão automática, com trilha de auditoria."""
 import json
 import sqlite3
 from typing import Dict, List
-
-
-def pendentes(con: sqlite3.Connection, cliente_id: int = None, limite: int = 100) -> List[Dict]:
-    q = ("SELECT c.id,c.classificacao,c.nivel,c.polo,c.nome_na_fonte,c.categoria_data,c.evidencia,p.numero_processo,p.tribunal,"
-         "p.data_ajuizamento,cl.razao_social FROM correspondencias c JOIN processos p ON p.id=c.processo_id "
-         "JOIN clientes cl ON cl.id=c.cliente_id WHERE c.estado_validacao='pendente'")
-    args: list = []
-    if cliente_id:
-        q += " AND c.cliente_id=?"; args.append(cliente_id)
-    q += " ORDER BY (c.classificacao='provavel') DESC, c.identificada_em LIMIT ?"
-    return [dict(r) for r in con.execute(q, args + [limite])]
 
 
 def decidir(con: sqlite3.Connection, correspondencia_id: int, usuario: str, decisao: str, justificativa: str = "") -> None:

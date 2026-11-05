@@ -54,9 +54,15 @@ def recuperar_travados(con: sqlite3.Connection) -> Dict[str, int]:
     return {"jobs_devolvidos": rec, "jobs_esgotados": morto, "execucoes_interrompidas": orf}
 
 
-def _pipeline_pos_execucao(con, resumo, ia, **kw) -> Dict:
+def _pipeline_pos_execucao(con, resumo, ia, motor=None, **kw) -> Dict:
     """Depois de buscar: analisa o que é novo, alerta sem duplicar e avisa se houve falha de consulta."""
     analisadas = 0
+    if motor is not None:   # vínculos incertos são resolvidos pelo próprio sistema (sem fila humana)
+        try:
+            from . import resolucao
+            resolucao.resolver_pendentes(con, motor)
+        except Exception as e:
+            print("falha na resolução automática:", e, flush=True)
     try:
         from . import cobertura
         cobertura.gravar_relatorio(con)
@@ -99,13 +105,13 @@ def executar_job(con: sqlite3.Connection, motor: Motor, job: sqlite3.Row, ia=Non
         r = motor.executar({"agendador": "agendado", "intradia": "intradia"}.get(job["origem"], "manual"), p.get("cliente_ids"),
                            date.fromisoformat(p["desde"]) if p.get("desde") else None,
                            date.fromisoformat(p["ate"]) if p.get("ate") else None, bool(p.get("forcar")))
-        return {"execucao": r, **_pipeline_pos_execucao(con, r, ia, **kw)}
+        return {"execucao": r, **_pipeline_pos_execucao(con, r, ia, motor=motor, **kw)}
     if job["tipo"] == "reprocessar_falhas":
         r = motor.reprocessar_falhas()
-        return {"execucao": r, **_pipeline_pos_execucao(con, r, ia, **kw)}
+        return {"execucao": r, **_pipeline_pos_execucao(con, r, ia, motor=motor, **kw)}
     if job["tipo"] == "preencher_lacunas":
         r = motor.preencher_lacunas()
-        return {"execucao": r, **_pipeline_pos_execucao(con, r, ia, **kw)}
+        return {"execucao": r, **_pipeline_pos_execucao(con, r, ia, motor=motor, **kw)}
     if job["tipo"] == "saude_fontes":
         from . import adapters, observabilidade
         sond = observabilidade.sondar(con, motor)
@@ -115,18 +121,20 @@ def executar_job(con: sqlite3.Connection, motor: Motor, job: sqlite3.Row, ia=Non
         return {"sondas": sond, "adapters": ad, "chamadas_podadas": podadas, "cobertura": cob["resumo"], "completa": cob["completa"],
                 "alertas": _alertar_cobertura(con, cob, **kw)}
     if job["tipo"] == "enriquecer":
-        return {"datajud": motor.enriquecer_pendentes()}
+        from . import resolucao
+        return {"datajud": motor.enriquecer_pendentes(), "resolucao": resolucao.resolver_pendentes(con, motor)}
     if job["tipo"] == "varrer_cadernos":
         from . import cadernos
         r = cadernos.varrer(con, motor, dias=int(p.get("dias", 3)))
-        return {"execucao": r, **_pipeline_pos_execucao(con, r, ia, **kw)}
+        return {"execucao": r, **_pipeline_pos_execucao(con, r, ia, motor=motor, **kw)}
     if job["tipo"] == "verificar_controle":
         from . import cobertura
         r = cobertura.verificar_controle(con, motor)
-        if r.get("recuperado"):   # canário: processo conhecido que o DJEN nomeia e a pesquisa não tinha pego = regressão
+        falhas_c = (r.get("recuperado") or 0) + (r.get("regressao") or 0)
+        if falhas_c:   # canário: processo conhecido que deixou de ser detectável = regressão de fonte/parser
             notificacoes.emitir(con, {"tipo": "falha_consulta", "definitivo": False, "cliente": "(sistema)", "correspondencia_id": None,
-                                      "detalhe": "REGRESSÃO DE FONTE/PARSER: %d processo(s)-controle nomeados pelo DJEN não estavam na base. Investigar." % r["recuperado"]},
-                                "regressao:%s:%d" % (date.today().isoformat(), r["recuperado"]), **kw)
+                                      "detalhe": "REGRESSÃO DE FONTE/PARSER: %d processo(s) conhecido(s) deixaram de ser detectados pelo DJEN/matcher. Investigar." % falhas_c},
+                                "regressao:%s:%d" % (date.today().isoformat(), falhas_c), **kw)
         return {"controle": r}
     if job["tipo"] == "alertas":
         return {"alertas": notificacoes.processar_pendentes(con, **kw)}
@@ -189,9 +197,11 @@ def agendar(con: sqlite3.Connection, agora: Optional[datetime] = None) -> Dict[s
         ja_diario = con.execute("SELECT 1 FROM jobs WHERE origem='agendador' AND tipo='executar' AND date(criado_em)=?", (agora.date().isoformat(),)).fetchone()
         if ja_diario and vencido("executar", fr["djen_intradia"], "intradia"):
             enfileirar(con, "executar", {"desde": (agora.date() - timedelta(days=1)).isoformat()}, "intradia", agora); feito["djen_intradia"] = True
-        if con.execute("SELECT 1 FROM processos WHERE datajud_status IN ('pendente','falha') LIMIT 1").fetchone() and vencido("enriquecer", fr["datajud_enriquecer"]):
+        if (con.execute("SELECT 1 FROM processos WHERE datajud_status IN ('pendente','falha') LIMIT 1").fetchone()
+                or con.execute("SELECT 1 FROM correspondencias WHERE estado_validacao IN ('em_verificacao','pendente') AND classificacao!='descartada' LIMIT 1").fetchone()) \
+                and vencido("enriquecer", fr["datajud_enriquecer"]):
             enfileirar(con, "enriquecer", {}, "agendador", agora); feito["enriquecer"] = True
-        if (agora.hour, agora.minute) >= (min(hh + 1, 23), mm) and con.execute("SELECT 1 FROM controle_processos LIMIT 1").fetchone() and \
+        if (agora.hour, agora.minute) >= (min(hh + 1, 23), mm) and \
                 not con.execute("SELECT 1 FROM jobs WHERE tipo='verificar_controle' AND date(criado_em)=?", (agora.date().isoformat(),)).fetchone():
             enfileirar(con, "verificar_controle", {}, "agendador", agora); feito["controle"] = True
     except Exception as e:

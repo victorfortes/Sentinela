@@ -97,6 +97,42 @@ def gravar_relatorio(con: sqlite3.Connection) -> Dict:
     return resumo
 
 
+def atualizar_canarios(con: sqlite3.Connection, por_cliente: int = 5) -> int:
+    """Canários AUTOMÁTICOS: amostra processos que o próprio sistema já confirmou (com comunicação recente) e os revisita todo dia.
+    Se um deles deixar de ser detectável, a fonte ou o parser regrediu. Substitui qualquer lista cadastrada à mão."""
+    novos = 0
+    lim = (date.today() - timedelta(days=60)).isoformat()
+    for c in _clientes.ativos(con):
+        faltam = por_cliente - con.execute("SELECT count(*) FROM controle_processos WHERE cliente_id=? AND origem='auto'", (c["id"],)).fetchone()[0]
+        if faltam <= 0:
+            continue
+        for r in con.execute("SELECT p.numero_processo,max(m.data_disponibilizacao) d FROM correspondencias c JOIN processos p ON p.id=c.processo_id "
+                             "JOIN comunicacoes m ON m.numero_processo=p.numero_processo WHERE c.cliente_id=? AND c.classificacao='confirmada' "
+                             "AND c.evidencia NOT LIKE '%numeroProcesso:%' AND m.data_disponibilizacao>=? AND p.numero_processo NOT IN "
+                             "(SELECT numero_processo FROM controle_processos WHERE cliente_id=?) GROUP BY p.numero_processo ORDER BY d DESC LIMIT ?",
+                             (c["id"], lim, c["id"], faltam)).fetchall():
+            con.execute("INSERT OR IGNORE INTO controle_processos(cliente_id,numero_processo,observacao,criado_por,origem) VALUES (?,?,?,?,'auto')",
+                        (c["id"], r["numero_processo"], "canário automático", "sistema"))
+            novos += 1
+    con.commit()
+    return novos
+
+
+def _verificar_canario(motor, cli, numero):
+    from . import matcher
+    from .motor import _normalizar_item
+    try:
+        itens, _, _ = motor.djen.consultar("numeroProcesso", numero, None, None)
+    except Exception as e:
+        return "erro", str(e)[:200]
+    coms = [_normalizar_item(i) for i in itens if len(i.get("numero_processo") or "") == 20]
+    if not coms:
+        return "regressao", "o DJEN deixou de devolver comunicações de um processo conhecido: regressão da fonte"
+    if any((m := matcher.avaliar(cli, c)) and m["classificacao"] in ("confirmada", "provavel") for c in coms):
+        return "canario_ok", "processo conhecido ainda é detectado"
+    return "regressao", "o DJEN devolve o processo, mas o cliente deixou de ser identificado: regressão de parser/regra"
+
+
 def _motivo_invisivel(coms) -> str:
     import re
     nomes = [d.get("nome") or "" for c in coms for d in c.get("destinatarios", [])]
@@ -131,9 +167,18 @@ def verificar_controle(con: sqlite3.Connection, motor) -> Dict:
     """Para cada processo-controle: está na base? Se não, o DJEN o publicou? Se sim, é falha nossa e é reparada na hora."""
     from . import matcher
     from .motor import _normalizar_item, agora_iso
-    res = {"capturado": 0, "recuperado": 0, "revisar": 0, "anterior_ao_historico": 0, "invisivel_no_djen": 0, "fora_da_fonte": 0, "erro": 0}
+    res = {"capturado": 0, "recuperado": 0, "revisar": 0, "anterior_ao_historico": 0, "invisivel_no_djen": 0, "fora_da_fonte": 0, "erro": 0,
+           "canario_ok": 0, "regressao": 0}
+    atualizar_canarios(con)
     for r in con.execute("SELECT * FROM controle_processos").fetchall():
         cli = _clientes.carregar(con, r["cliente_id"])
+        if r["origem"] == "auto":   # canário automático: nenhum humano cadastra nada
+            res_i, det = _verificar_canario(motor, cli, r["numero_processo"])
+            con.execute("UPDATE controle_processos SET resultado=?,detalhe=?,verificado_em=? WHERE id=?",
+                        (res_i, det, datetime.now().isoformat(timespec="seconds"), r["id"]))
+            con.commit()
+            res[res_i] += 1
+            continue
         # a pesquisa só olha para trás até o início do histórico buscado do cliente; o que o DJEN publicou antes disso não é "perda"
         inicio = con.execute("SELECT min(janela_inicio) FROM consultas WHERE cliente_id=? AND status IN ('ok','truncada') "
                              "AND chave NOT LIKE 'numeroProcesso:%'", (r["cliente_id"],)).fetchone()[0] or "9999-12-31"

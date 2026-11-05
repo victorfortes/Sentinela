@@ -164,7 +164,7 @@ def dashboard(u=Depends(usuario_atual), con: sqlite3.Connection = Depends(get_co
         "identificados_hoje": contar(hoje), "identificados_semana": contar(hoje - timedelta(days=7)), "identificados_mes": contar(hoje - timedelta(days=30)),
         "clientes_monitorados": con.execute("SELECT count(*) FROM clientes WHERE status_monitoramento='ativo'").fetchone()[0],
         "novas_acoes_confirmadas": con.execute("SELECT count(*) FROM correspondencias WHERE classificacao='confirmada' AND categoria_data='nova_distribuicao'").fetchone()[0],
-        "pendentes_validacao": con.execute("SELECT count(*) FROM correspondencias WHERE estado_validacao='pendente'").fetchone()[0],
+        "em_verificacao": con.execute("SELECT count(*) FROM correspondencias WHERE estado_validacao IN ('em_verificacao','pendente') AND classificacao!='descartada'").fetchone()[0],
         "falhas_consultas_24h": falhas24, "consultas_a_reprocessar": pendentes_falha,
         "tribunais_com_dados": con.execute("SELECT count(DISTINCT tribunal) FROM processos").fetchone()[0],
         "tribunais_com_conector_validado": 0,
@@ -380,31 +380,9 @@ def pedir_analise(pid: int, u=Depends(exigir("advogado")), con: sqlite3.Connecti
 
 
 # ---------- validação ----------
-@app.get("/api/validacao/pendentes")
-def pendentes(cliente_id: Optional[int] = None, limite: int = 100, u=Depends(usuario_atual), con: sqlite3.Connection = Depends(get_con)):
-    itens = validacao.pendentes(con, cliente_id, max(1, min(limite, 500)))
-    for i in itens:
-        i["evidencia"] = json.loads(i["evidencia"])
-    total = con.execute("SELECT count(*) FROM correspondencias WHERE estado_validacao='pendente'").fetchone()[0]
-    return {"total": total, "itens": itens}
-
-
 class Decisao(BaseModel):
     decisao: str
     justificativa: str = ""
-
-
-class DecisaoLote(Decisao):
-    ids: List[int]
-
-
-@app.post("/api/validacao/lote")
-def decidir_lote(d: DecisaoLote, u=Depends(exigir("advogado")), con: sqlite3.Connection = Depends(get_con)):
-    if d.decisao not in ("confirmada", "descartada") or not d.justificativa.strip():
-        raise HTTPException(422, "decisão e justificativa são obrigatórias em lote")
-    n = validacao.decidir_em_lote(con, d.ids, u["email"], d.decisao, d.justificativa)
-    auditar(con, u, "validacao_lote", "correspondencia", None, {"ids": len(d.ids), "decisao": d.decisao})
-    return {"decididas": n}
 
 
 @app.post("/api/validacao/{cid}")

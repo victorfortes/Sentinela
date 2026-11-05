@@ -81,14 +81,14 @@ class TestAlertasAnalise(Base):
         self.assertEqual(notificacoes.emitir(self.con, a, "1", enviar_email=lambda s, c: env.append(s))["email"], "duplicado_ignorado")
         self.assertEqual(len(env), 1)
         txt = notificacoes.texto(a)[1]
-        for campo in ("Cliente", "Processo", "Tribunal", "Distribuição", "Natureza", "Valor da causa", "Prioridade", "Validação", "Síntese", "Consulta oficial"):
+        for campo in ("Cliente", "Processo", "Tribunal", "Distribuição", "Natureza", "Valor da causa", "Prioridade", "Confiança", "Situação", "Síntese", "Consulta oficial"):
             self.assertIn(campo, txt)
 
     def test_processo_antigo_e_descartado_nao_alertam(self):
         clientes.cadastrar(self.con, "Acme Indústria Ltda", CNPJ_OK)
         m = self.motor(djen([item(1, texto="CNPJ 47.960.950/0001-21"), {**item(2, polo="A"), "numero_processo": "00000000000000000002"}]), dj_ok("20200101000000"))
         m.executar(desde=date(2026, 10, 28))
-        self.assertEqual(notificacoes.processar_pendentes(self.con), {"definitivos": 0, "conferencia": 0, "duplicados": 0, "falhas_envio": 0})
+        self.assertEqual(notificacoes.processar_pendentes(self.con), {"definitivos": 0, "conferencia": 0, "possiveis": 0, "duplicados": 0, "falhas_envio": 0})
 
     def test_falha_de_execucao_gera_alerta_distinto(self):
         clientes.cadastrar(self.con, "Acme Indústria Ltda", CNPJ_OK)
@@ -185,11 +185,9 @@ class TestAPI(Base):
         clientes.cadastrar(self.con, "Acme Indústria Ltda", CNPJ_OK)
         m = self.motor(djen([item(1)]), dj_ok()); m.executar(desde=date.today())
         h, hl = self.h("adv@x.com"), self.h("ler@x.com")
-        p = self.c.get("/api/validacao/pendentes", headers=h).json()
-        self.assertEqual(p["total"], 1)
-        cid = p["itens"][0]["id"]
+        self.assertIn(self.c.get("/api/validacao/pendentes", headers=h).status_code, (404, 405))   # a fila humana deixou de existir
+        cid = self.con.execute("SELECT id FROM correspondencias").fetchone()[0]
         self.assertEqual(self.c.post("/api/validacao/%d" % cid, json={"decisao": "confirmada"}, headers=hl).status_code, 403)
-        self.assertEqual(self.c.post("/api/validacao/lote", json={"ids": [cid], "decisao": "confirmada", "justificativa": ""}, headers=h).status_code, 422)
         self.assertEqual(self.c.post("/api/validacao/%d" % cid, json={"decisao": "confirmada", "justificativa": "ok"}, headers=h).status_code, 200)
         uid = self.con.execute("SELECT id FROM usuarios WHERE email='adv@x.com'").fetchone()[0]
         self.assertEqual(self.c.post("/api/processos/%d/atribuir" % cid, json={"usuario_id": uid}, headers=h).status_code, 200)
@@ -703,6 +701,80 @@ class TestRadarObservabilidade(TestAPI):
                          "VALUES (?,?,5,'inconclusiva','{}','djen',datetime('now'),datetime('now'),'nova_distribuicao',50)", (cid, pid))
         self.con.commit()
         self.assertEqual(notificacoes.processar_pendentes(self.con)["conferencia"], 0)
+
+
+class TestSemFilaHumana(TestAPI):
+    def _transporte(self, por_numero):
+        from urllib.parse import urlparse, parse_qs
+        def tr(m, url, h, c, t):
+            q = {k: v[0] for k, v in parse_qs(urlparse(url).query).items()}
+            if "numeroProcesso" in q:
+                its = por_numero
+            else:
+                its = [item(1)]
+            return resp({"status": "success", "count": len(its), "items": its})
+        return tr
+
+    def test_incerto_e_promovido_sozinho_pelo_historico_do_processo(self):
+        from sentinela import resolucao
+        clientes.cadastrar(self.con, "Acme Indústria Ltda", CNPJ_OK)
+        hist = [item(1), dict(item(2, texto="Réu(s): ACME INDUSTRIA LTDA (CPF/CNPJ: 47.960.950/0001-21)"), id=2)]
+        mt = self.motor(self._transporte(hist))
+        mt.executar("manual", desde=date.today(), forcar=True)
+        c = self.con.execute("SELECT classificacao,estado_validacao FROM correspondencias").fetchone()
+        self.assertEqual((c["classificacao"], c["estado_validacao"]), ("provavel", "em_verificacao"))   # sem tarefa humana
+        r = resolucao.resolver_pendentes(self.con, mt)
+        c = self.con.execute("SELECT classificacao,estado_validacao FROM correspondencias").fetchone()
+        self.assertEqual((r["promovidos"], c["classificacao"], c["estado_validacao"]), (1, "confirmada", "automatico"))
+        self.assertIn("AUTO_RESOLVIDO", [x[0] for x in self.con.execute("SELECT tipo FROM processo_eventos")])
+
+    def test_incerto_e_descartado_sozinho_quando_cliente_so_e_autor(self):
+        from sentinela import resolucao
+        clientes.cadastrar(self.con, "Acme Indústria Ltda", CNPJ_OK)
+        mt = self.motor(self._transporte([item(3, polo="A")]))
+        pid = self.con.execute("INSERT INTO processos(numero_processo,tribunal,primeira_identificacao,ultima_verificacao) VALUES (?,?,datetime('now'),datetime('now'))", (NUM, "TJRJ")).lastrowid
+        self.con.execute("INSERT INTO correspondencias(cliente_id,processo_id,nivel,classificacao,evidencia,fonte,estado_validacao,identificada_em,ultima_verificacao) "
+                         "VALUES (1,?,5,'inconclusiva','{}','djen','em_verificacao',datetime('now'),datetime('now'))", (pid,))
+        self.con.commit()
+        r = resolucao.resolver_pendentes(self.con, mt)
+        self.assertEqual(r["descartados"], 1)
+        self.assertEqual(self.con.execute("SELECT estado_validacao FROM correspondencias").fetchone()[0], "descartado_auto")
+
+    def test_sem_corroboracao_fica_como_possivel_e_finaliza_em_14_dias_sem_tarefa(self):
+        from sentinela import resolucao
+        clientes.cadastrar(self.con, "Acme Indústria Ltda", CNPJ_OK)
+        mt = self.motor(self._transporte([]))
+        pid = self.con.execute("INSERT INTO processos(numero_processo,tribunal,primeira_identificacao,ultima_verificacao) VALUES (?,?,datetime('now'),datetime('now'))", (NUM, "TJRJ")).lastrowid
+        self.con.execute("INSERT INTO correspondencias(cliente_id,processo_id,nivel,classificacao,evidencia,fonte,estado_validacao,identificada_em,ultima_verificacao) "
+                         "VALUES (1,?,5,'inconclusiva','{}','djen','em_verificacao',datetime('now','-20 day'),datetime('now'))", (pid,))
+        self.con.commit()
+        self.assertEqual(resolucao.resolver_pendentes(self.con, mt)["finalizados"], 1)
+        self.assertEqual(self.con.execute("SELECT estado_validacao FROM correspondencias").fetchone()[0], "automatico")
+
+    def test_alertas_por_confianca_confirmada_possivel_e_nenhum(self):
+        cid = clientes.cadastrar(self.con, "Acme Indústria Ltda", CNPJ_OK)
+        for i, conf in enumerate((100, 80, 50)):
+            pid = self.con.execute("INSERT INTO processos(numero_processo,tribunal,primeira_identificacao,ultima_verificacao) VALUES (?,?,datetime('now'),datetime('now'))", ("000000%d" % i, "TJPR")).lastrowid
+            self.con.execute("INSERT INTO correspondencias(cliente_id,processo_id,nivel,classificacao,evidencia,fonte,identificada_em,ultima_verificacao,categoria_data,confianca) "
+                             "VALUES (?,?,1,'confirmada','{}','djen',datetime('now'),datetime('now'),'nova_distribuicao',?)", (cid, pid, conf))
+        self.con.commit()
+        r = notificacoes.processar_pendentes(self.con)
+        self.assertEqual((r["definitivos"], r["possiveis"]), (1, 1))
+        tipos = {x[0] for x in self.con.execute("SELECT tipo FROM alertas")}
+        self.assertEqual(tipos, {"nova_acao_confirmada", "nova_acao_possivel"})
+
+    def test_canarios_automaticos_detectam_regressao_da_fonte(self):
+        from sentinela import cobertura
+        cid = clientes.cadastrar(self.con, "Acme Indústria Ltda", CNPJ_OK)
+        mt = self.motor(djen([item(1, texto="CNPJ 47.960.950/0001-21")]))
+        mt.executar("manual", desde=date.today(), forcar=True)
+        self.assertEqual(self.con.execute("SELECT classificacao FROM correspondencias").fetchone()[0], "confirmada")
+        self.assertEqual(cobertura.atualizar_canarios(self.con), 1)
+        self.assertEqual(self.con.execute("SELECT origem FROM controle_processos").fetchone()[0], "auto")
+        ok = cobertura.verificar_controle(self.con, self.motor(djen([item(1, texto="CNPJ 47.960.950/0001-21")])))
+        self.assertEqual((ok["canario_ok"], ok["regressao"]), (1, 0))
+        quebrado = cobertura.verificar_controle(self.con, self.motor(djen([])))   # o DJEN parou de devolver o processo conhecido
+        self.assertEqual(quebrado["regressao"], 1)
 
 
 if __name__ == "__main__":
