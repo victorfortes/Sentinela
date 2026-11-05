@@ -726,6 +726,7 @@ class TestSemFilaHumana(TestAPI):
         r = resolucao.resolver_pendentes(self.con, mt)
         c = self.con.execute("SELECT classificacao,estado_validacao FROM correspondencias").fetchone()
         self.assertEqual((r["promovidos"], c["classificacao"], c["estado_validacao"]), (1, "confirmada", "automatico"))
+        self.assertFalse(self.con.in_transaction)   # transação aberta travaria o batimento do worker (painel ficaria "PARADO")
         self.assertIn("AUTO_RESOLVIDO", [x[0] for x in self.con.execute("SELECT tipo FROM processo_eventos")])
 
     def test_incerto_e_descartado_sozinho_quando_cliente_so_e_autor(self):

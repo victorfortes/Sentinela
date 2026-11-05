@@ -43,6 +43,7 @@ def resolver_pendentes(con, motor, limite: int = 60) -> Dict[str, int]:
                 radar.evento(con, motor_pid(con, r["id"]), "AUTO_RESOLVIDO", r["cliente_id"], "DJEN", "promovido a confirmado pelo histórico do processo")
                 res["promovidos"] += 1
                 con.execute("UPDATE correspondencias SET resolvida_em=? WHERE id=?", (agora_iso(), r["id"]))
+                con.commit()
                 continue
         achou_algo = [m for c, m in avals if m]
         if achou_algo and all(m["classificacao"] == "descartada" for m in achou_algo):

@@ -152,6 +152,7 @@ def _incluir(con, motor, cli, r, achados, total, n):
                                 "ini": hoje, "fim": hoje, "inicio": agora_iso(), "status": "ok", "total": total, "lidos": n, "erro": None,
                                 "achados": achados}])
     con.execute("UPDATE execucoes SET fim=?,status='sucesso' WHERE id=?", (agora_iso(), ex))
+    con.commit()   # nunca deixa transação aberta: ela travaria a escrita do batimento do worker e de qualquer outro processo
 
 
 # ---------- processos-controle: a única medida real de "estamos perdendo algo?" ----------
