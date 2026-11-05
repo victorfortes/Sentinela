@@ -167,6 +167,7 @@ def verificar_controle(con: sqlite3.Connection, motor) -> Dict:
                     res_i, det = "invisivel_no_djen", "o DJEN tem comunicações, mas NENHUMA nomeia o cliente (%s): invisível para busca por nome/CNPJ" % _motivo_invisivel(coms)
         con.execute("UPDATE controle_processos SET resultado=?,detalhe=?,verificado_em=? WHERE id=?",
                     (res_i, det, datetime.now().isoformat(timespec="seconds"), r["id"]))
+        con.commit()   # não segura a trava de escrita durante as chamadas de rede seguintes
         res[res_i] += 1
     con.commit()
     base = res["capturado"] + res["recuperado"]
