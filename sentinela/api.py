@@ -12,7 +12,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import analise, cadernos, clientes, cobertura, config as _config, db, fila, matriz, seguranca, validacao
+from . import adapters, analise, cadernos, clientes, cobertura, observabilidade, radar, config as _config, db, fila, matriz, seguranca, validacao
 
 CAMINHO_DB = lambda: os.environ.get("SENTINELA_DB", "data/sentinela.db")
 WEB = os.path.join(os.path.dirname(__file__), "web")
@@ -119,6 +119,11 @@ def dashboard(u=Depends(usuario_atual), con: sqlite3.Connection = Depends(get_co
         estado = {"codigo": "ok_com_novos" if novos else "ok_sem_novos",
                   "texto": ("Pesquisa concluída com sucesso: %d possível(is) nova(s) ação(ões) nas últimas 24 h." % novos) if novos
                   else "Pesquisa concluída com sucesso: nenhuma nova ação encontrada nas fontes consultadas (cobertura limitada às fontes validadas)."}
+    cob = observabilidade.cobertura_monitoramento(con)
+    if estado["codigo"] == "ok_sem_novos":
+        estado["texto"] = observabilidade.frase_sem_novos(cob)
+        if not cob["completa"]:
+            estado["codigo"] = "falha_parcial"
     aj_base = ("FROM correspondencias c JOIN processos p ON p.id=c.processo_id JOIN clientes cl ON cl.id=c.cliente_id "
                "WHERE c.classificacao!='descartada' AND p.data_ajuizamento=?")
     aj_cols = "SELECT c.id,c.classificacao,c.estado_validacao,c.prioridade,p.numero_processo,p.tribunal,p.classe,p.orgao,p.data_ajuizamento,cl.razao_social cliente "
@@ -145,6 +150,8 @@ def dashboard(u=Depends(usuario_atual), con: sqlite3.Connection = Depends(get_co
         "LEFT JOIN processos p ON p.id=c.processo_id WHERE cl.status_monitoramento='ativo' GROUP BY cl.id ORDER BY ult30 DESC,total DESC",
         ((hoje - timedelta(days=29)).isoformat(), hoje.isoformat()))]
     return {
+        "cobertura": {k: cob[k] for k in ("completa", "esperadas", "operacionais", "resumo", "problemas", "ultima_verificacao", "nao_monitoradas")},
+        "frase_sem_novos": observabilidade.frase_sem_novos(cob),
         "clientes_so_cnpj": [dict(r) for r in con.execute(
             "SELECT cl.id,cl.razao_social FROM clientes cl WHERE cl.status_monitoramento='ativo' AND NOT EXISTS ("
             "SELECT 1 FROM cliente_nomes n WHERE n.cliente_id=cl.id AND length(replace(n.nome_norm,' ',''))>=4)")],
@@ -340,8 +347,11 @@ def detalhe(pid: int, u=Depends(usuario_atual), con: sqlite3.Connection = Depend
     d["analise"] = ({**dict(a), "campos": json.loads(a["campos"]), "documentos": json.loads(a["documentos"])} if a else None)
     d["validacoes"] = [dict(x) for x in con.execute("SELECT usuario,decisao,classificacao_anterior,justificativa,decidida_em FROM validacoes WHERE correspondencia_id=? ORDER BY id", (pid,))]
     d["alertas"] = [dict(x) for x in con.execute("SELECT tipo,canal,status,erro,criado_em FROM alertas WHERE correspondencia_id=? ORDER BY id", (pid,))]
-    d["fontes"] = [{"fonte": "DJEN", "usada_para": "partes, polo e comunicações", "evidencia_id": d["comunicacao_id"]},
-                   {"fonte": "DataJud", "usada_para": "data de ajuizamento, classe, órgão", "status": d["datajud_status"]}]
+    d["fontes"] = [dict(x) for x in con.execute("SELECT fonte,identificador,primeiro_visto,ultimo_visto,vezes FROM processo_fontes WHERE processo_id=? ORDER BY primeiro_visto", (d["processo_id"],))]
+    d["eventos"] = [dict(x) for x in con.execute("SELECT tipo,fonte,detalhe,criado_em FROM processo_eventos WHERE processo_id=? ORDER BY id", (d["processo_id"],))]
+    d["partes"] = [dict(x) for x in con.execute("SELECT nome,lado,fonte FROM processo_partes WHERE processo_id=? ORDER BY lado,nome", (d["processo_id"],))]
+    d["campos_divergentes"] = radar.conflitos(con, d["processo_id"])
+    d["limiares"] = {k: _config.obter(con, "radar")[k] for k in ("confianca_auto", "confianca_revisao")}
     return d
 
 
@@ -431,7 +441,7 @@ class JobIn(BaseModel):
 
 @app.post("/api/jobs", status_code=201)
 def novo_job(d: JobIn, u=Depends(exigir("advogado")), con: sqlite3.Connection = Depends(get_con)):
-    if d.tipo not in ("executar", "reprocessar_falhas", "alertas", "preencher_lacunas", "verificar_controle", "varrer_cadernos"):
+    if d.tipo not in ("executar", "reprocessar_falhas", "alertas", "preencher_lacunas", "verificar_controle", "varrer_cadernos", "saude_fontes", "enriquecer"):
         raise HTTPException(422, "tipo inválido")
     params = dict(d.params)
     if d.tipo == "executar":
@@ -514,6 +524,25 @@ def controle_apagar(cid: int, u=Depends(exigir("advogado")), con: sqlite3.Connec
 def cobertura_relatorios(u=Depends(usuario_atual), con: sqlite3.Connection = Depends(get_con)):
     return [{"dia": r["dia"], "gerado_em": r["gerado_em"], **{k: v for k, v in json.loads(r["conteudo"]).items() if k in ("integra", "total", "lacunas")}}
             for r in con.execute("SELECT * FROM relatorios_cobertura ORDER BY dia DESC LIMIT 60")]
+
+
+@app.get("/api/radar/cobertura")
+def radar_cobertura(u=Depends(usuario_atual), con: sqlite3.Connection = Depends(get_con)):
+    return observabilidade.cobertura_monitoramento(con)
+
+
+@app.get("/api/radar/metricas")
+def radar_metricas(dias: int = 1, u=Depends(usuario_atual), con: sqlite3.Connection = Depends(get_con)):
+    return observabilidade.metricas(con, max(1, min(dias, 30)))
+
+
+@app.get("/api/radar/chamadas")
+def radar_chamadas(fonte: Optional[str] = None, limite: int = 100, u=Depends(usuario_atual), con: sqlite3.Connection = Depends(get_con)):
+    """Trilha de auditoria: o que foi consultado, quando, com qual resposta."""
+    q, a = "SELECT * FROM fonte_chamadas", []
+    if fonte:
+        q += " WHERE fonte=?"; a.append(fonte)
+    return [dict(r) for r in con.execute(q + " ORDER BY id DESC LIMIT ?", a + [max(1, min(limite, 500))])]
 
 
 @app.get("/api/jobs")

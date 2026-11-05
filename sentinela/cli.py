@@ -19,11 +19,18 @@ def montar_motor(con, **kw) -> Motor:
     kw.setdefault("dias_retroativos", cfg["dias_busca_inicial"])
     kw.setdefault("dias_nova", cfg["dias_nova_distribuicao"])
     lock = threading.Lock()
-    cb = lambda f, ok, e: registrar_saude(con, lock, f, ok, e)
-    djen = ConectorDJEN(FonteHTTP("djen", min_intervalo=1.0, ao_resultado=cb))
-    dj = ConectorDataJud(FonteHTTP("datajud", min_intervalo=0.2, timeout=60, ao_resultado=cb))
+    # conexão PRÓPRIA para saúde/auditoria: chamadas HTTP feitas em várias threads não competem pela transação da conexão principal
+    import sqlite3
+    caminho = con.execute("PRAGMA database_list").fetchone()[2]
+    con_log = sqlite3.connect(caminho, timeout=30, check_same_thread=False)
+    con_log.row_factory = sqlite3.Row
+    from . import observabilidade
+    cb = lambda f, ok, e: registrar_saude(con_log, lock, f, ok, e)
+    aud = lambda d: observabilidade.registrar_chamada(con_log, lock, d)
+    djen = ConectorDJEN(FonteHTTP("djen", min_intervalo=1.0, ao_resultado=cb, ao_chamada=aud))
+    dj = ConectorDataJud(FonteHTTP("datajud", min_intervalo=0.2, timeout=60, ao_resultado=cb, ao_chamada=aud))
     m = Motor(con, djen, dj, **kw)
-    m.registro = ConectorRegistroCNPJ(FonteHTTP("cnpj_registro", min_intervalo=1.0, ao_resultado=cb))
+    m.registro = ConectorRegistroCNPJ(FonteHTTP("cnpj_registro", min_intervalo=1.0, ao_resultado=cb, ao_chamada=aud))
     return m
 
 

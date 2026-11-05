@@ -103,8 +103,9 @@ def emitir(con: sqlite3.Connection, a: Dict, ref: str, enviar_email: Callable = 
 def processar_pendentes(con: sqlite3.Connection, **kw) -> Dict[str, int]:
     """Gera alertas para correspondências recentes. Processos antigos achados agora e descartados não alertam."""
     cont = {"definitivos": 0, "conferencia": 0, "duplicados": 0, "falhas_envio": 0}
+    minimo = _config.obter(con, "radar")["confianca_revisao"]
     rows = con.execute("SELECT id,classificacao,estado_validacao FROM correspondencias WHERE classificacao!='descartada' "
-                       "AND categoria_data!='processo_antigo'").fetchall()
+                       "AND categoria_data!='processo_antigo' AND (confianca IS NULL OR confianca>=?)", (minimo,)).fetchall()
     for r in rows:
         definitivo = r["classificacao"] == "confirmada" and con.execute(
             "SELECT categoria_data FROM correspondencias WHERE id=?", (r["id"],)).fetchone()[0] == "nova_distribuicao"

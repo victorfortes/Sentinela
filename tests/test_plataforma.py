@@ -177,6 +177,8 @@ class TestAPI(Base):
         m = self.motor(lambda *a: resp({}, 503)); m.executar(desde=date.today())
         self.assertEqual(self.c.get("/api/dashboard", headers=h).json()["estado_pesquisa"]["codigo"], "falha_total")
         m2 = self.motor(djen([])); m2.executar(desde=date.today(), forcar=True)
+        from sentinela import config as _cfg
+        _cfg.salvar(self.con, "radar", {**_cfg.obter(self.con, "radar"), "fontes_esperadas": ["DJEN_BUSCA"]})
         self.assertEqual(self.c.get("/api/dashboard", headers=h).json()["estado_pesquisa"]["codigo"], "ok_sem_novos")
 
     def test_validacao_atribuicao_detalhe(self):
@@ -612,6 +614,21 @@ class TestCadernos(Base):
         baixados.clear()
         cadernos.varrer(self.con, mt, dias=1, baixar=baixar, trabalhadores=1)
         self.assertEqual(self.con.execute("SELECT count(*) FROM correspondencias").fetchone()[0], 1)   # sem duplicar
+        self.assertEqual(baixados, [])   # mesma versão/hash já lida por inteiro: não baixa de novo
+
+    def test_dia_sem_caderno_404_nao_e_erro_e_fecha(self):
+        from sentinela import cadernos
+        from sentinela.http import ErroFonte
+        clientes.cadastrar(self.con, "Acme Indústria Ltda", CNPJ_OK)
+        class H:
+            def requisitar(h, m, url, *a, **k):
+                if url.endswith("/tribunal"):
+                    return [{"instituicoes": [{"sigla": "TJA"}]}]
+                raise ErroFonte("djen: HTTP 404", 404)
+        mt = self.motor(lambda *a: resp({})); mt.djen.http = H()
+        r = cadernos.varrer(self.con, mt, dias=1, baixar=lambda u, d: None, trabalhadores=1)
+        self.assertEqual((r["cadernos_com_erro"], r["cadernos_processados"]), (0, 2))
+        self.assertEqual(cadernos.resumo(self.con, 1)[0]["fechados"], 2)
 
     def test_total_lido_diferente_do_declarado_marca_incompleto(self):
         from sentinela import cadernos
@@ -622,6 +639,70 @@ class TestCadernos(Base):
         cadernos.varrer(self.con, mt, dias=1, baixar=lambda u, d: self._zip(d, [item(1)]), trabalhadores=1)
         self.assertEqual(self.con.execute("SELECT status FROM cadernos WHERE sigla='TJA' AND meio='D'").fetchone()[0], "incompleto")
         self.assertEqual(cadernos.resumo(self.con, 1)[0]["com_erro"], 1)
+
+
+class TestRadarObservabilidade(TestAPI):
+    def test_zero_resultados_difere_de_falha_e_cobertura_incompleta_nao_diz_nenhuma_acao(self):
+        from sentinela import config as _cfg, observabilidade
+        _cfg.salvar(self.con, "radar", {**_cfg.obter(self.con, "radar"), "fontes_esperadas": ["DJEN_BUSCA"]})
+        clientes.cadastrar(self.con, "Acme Indústria Ltda", CNPJ_OK)
+        ok = self.motor(lambda *a: resp({"status": "success", "count": 0, "items": []}))
+        ok.executar("manual", desde=date.today(), forcar=True)
+        self.assertEqual({r[0] for r in self.con.execute("SELECT resultado FROM consultas")}, {"ZERO_RESULTS"})
+        h = self.h("adv@x.com")
+        d = self.c.get("/api/dashboard", headers=h).json()
+        self.assertIn("Monitoramento validado", d["estado_pesquisa"]["texto"])
+        # a fonte cai: consulta falha (QUERY_FAILED), nunca vira "zero resultados"
+        quebrada = self.motor(lambda *a: resp({}, 500))
+        quebrada.executar("manual", desde=date.today(), forcar=True)
+        res = {r[0] for r in self.con.execute("SELECT resultado FROM consultas ORDER BY id DESC LIMIT 3")}
+        self.assertEqual(res, {"QUERY_FAILED"})
+        d2 = self.c.get("/api/dashboard", headers=h).json()
+        self.assertNotIn("Monitoramento validado", d2["frase_sem_novos"])
+        self.assertIn("INCOMPLETA", d2["frase_sem_novos"])
+        self.assertFalse(d2["cobertura"]["completa"])
+        self.assertIn("DJEN_BUSCA", [p["fonte"] for p in d2["cobertura"]["problemas"]])
+        cod = {r[0] for r in self.con.execute("SELECT codigo FROM fonte_chamadas WHERE ok=0")}
+        self.assertIn("UNKNOWN_ERROR", cod)
+
+    def test_sonda_ativa_mantem_datajud_fresco_mesmo_sem_nada_a_enriquecer(self):
+        from sentinela import observabilidade
+        mt = self.motor(lambda *a: resp([]), lambda *a: resp({"hits": {"hits": []}}))
+        observabilidade.sondar(self.con, mt)
+        s = {x["fonte"]: x for x in observabilidade.saude_fontes(self.con)}
+        self.assertEqual((s["DATAJUD"]["estado"], s["DJEN_BUSCA"]["estado"]), ("HEALTHY", "HEALTHY"))
+
+    def test_fonte_para_de_responder_gera_down(self):
+        from sentinela import observabilidade
+        for _ in range(3):
+            observabilidade.registrar_chamada(self.con, self.lock, {"fonte": "DATAJUD", "tribunal": "TJPR", "ok": 0, "codigo": "TIMEOUT", "http_status": None, "latencia_ms": 60000})
+        s = {x["fonte"]: x for x in observabilidade.saude_fontes(self.con)}
+        self.assertEqual(s["DATAJUD"]["estado"], "DOWN")
+        self.assertEqual(s["DJEN_BUSCA"]["estado"], "UNKNOWN")
+
+    def test_vinculo_ganha_fontes_confianca_e_eventos_sem_duplicar_processo(self):
+        clientes.cadastrar(self.con, "Acme Indústria Ltda", CNPJ_OK)
+        mt = self.motor(djen([item(1, texto="CNPJ 47.960.950/0001-21")]), dj_ok(date.today().strftime("%Y%m%d") + "000000"))
+        mt.executar("manual", desde=date.today(), forcar=True)
+        mt.executar("manual", desde=date.today(), forcar=True)   # de novo: não duplica
+        self.assertEqual(self.con.execute("SELECT count(*) FROM processos").fetchone()[0], 1)
+        c = self.con.execute("SELECT confianca,status_deteccao FROM correspondencias").fetchone()
+        self.assertEqual((c["confianca"], c["status_deteccao"]), (100, "CONFIRMED"))   # DJEN + DataJud
+        self.assertEqual({r[0] for r in self.con.execute("SELECT fonte FROM processo_fontes")}, {"DJEN_BUSCA", "DATAJUD"})
+        ev = [r[0] for r in self.con.execute("SELECT tipo FROM processo_eventos ORDER BY id")]
+        self.assertEqual(ev.count("PROCESS_FIRST_SEEN"), 1)
+        self.assertIn("PARTY_CONFIRMED", ev)
+        self.assertTrue(self.con.execute("SELECT 1 FROM processo_partes WHERE lado='DEFENDANT'").fetchone())
+        det = self.c.get("/api/processos/%d" % self.con.execute("SELECT id FROM correspondencias").fetchone()[0], headers=self.h("adv@x.com")).json()
+        self.assertEqual({f["fonte"] for f in det["fontes"]}, {"DJEN_BUSCA", "DATAJUD"})
+
+    def test_abaixo_do_limiar_de_confianca_nao_gera_alerta_automatico(self):
+        cid = clientes.cadastrar(self.con, "Acme Indústria Ltda", CNPJ_OK)
+        pid = self.con.execute("INSERT INTO processos(numero_processo,tribunal,primeira_identificacao,ultima_verificacao) VALUES (?,?,datetime('now'),datetime('now'))", (NUM, "TJPR")).lastrowid
+        self.con.execute("INSERT INTO correspondencias(cliente_id,processo_id,nivel,classificacao,evidencia,fonte,identificada_em,ultima_verificacao,categoria_data,confianca) "
+                         "VALUES (?,?,5,'inconclusiva','{}','djen',datetime('now'),datetime('now'),'nova_distribuicao',50)", (cid, pid))
+        self.con.commit()
+        self.assertEqual(notificacoes.processar_pendentes(self.con)["conferencia"], 0)
 
 
 if __name__ == "__main__":

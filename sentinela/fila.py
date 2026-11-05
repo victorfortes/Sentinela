@@ -77,6 +77,18 @@ def _pipeline_pos_execucao(con, resumo, ia, **kw) -> Dict:
     return out
 
 
+def _alertar_cobertura(con, cob, **kw) -> int:
+    n = 0
+    for p in cob["problemas"]:
+        det = "COBERTURA INCOMPLETA: %s %s%s%s. Nenhum resultado 'sem processos' é confiável até a fonte voltar." % (
+            p["fonte"], "INDISPONÍVEL" if p["estado"] == "DOWN" else "DEGRADADA", " desde %s" % p["desde"][11:16] if p.get("desde") else "",
+            " (%s)" % p["erro"] if p.get("erro") else "")
+        r = notificacoes.emitir(con, {"tipo": "falha_consulta", "definitivo": False, "cliente": "(sistema)", "correspondencia_id": None, "detalhe": det},
+                                "cobertura:%s:%s:%s" % (date.today().isoformat(), p["fonte"], p["estado"]), **kw)
+        n += sum(1 for v in r.values() if v != "duplicado_ignorado")
+    return n
+
+
 def executar_job(con: sqlite3.Connection, motor: Motor, job: sqlite3.Row, ia=None, **kw) -> Dict:
     p = json.loads(job["params"])
     if job["tipo"] == "executar":
@@ -84,7 +96,7 @@ def executar_job(con: sqlite3.Connection, motor: Motor, job: sqlite3.Row, ia=Non
             from . import clientes as _cl
             for cid in p.get("cliente_ids") or []:   # razão social oficial pelo CNPJ, antes de pesquisar por nome
                 _cl.completar_nomes_pelo_registro(con, cid, motor.registro)
-        r = motor.executar("agendado" if job["origem"] == "agendador" else "manual", p.get("cliente_ids"),
+        r = motor.executar({"agendador": "agendado", "intradia": "intradia"}.get(job["origem"], "manual"), p.get("cliente_ids"),
                            date.fromisoformat(p["desde"]) if p.get("desde") else None,
                            date.fromisoformat(p["ate"]) if p.get("ate") else None, bool(p.get("forcar")))
         return {"execucao": r, **_pipeline_pos_execucao(con, r, ia, **kw)}
@@ -94,13 +106,28 @@ def executar_job(con: sqlite3.Connection, motor: Motor, job: sqlite3.Row, ia=Non
     if job["tipo"] == "preencher_lacunas":
         r = motor.preencher_lacunas()
         return {"execucao": r, **_pipeline_pos_execucao(con, r, ia, **kw)}
+    if job["tipo"] == "saude_fontes":
+        from . import adapters, observabilidade
+        sond = observabilidade.sondar(con, motor)
+        ad = adapters.sondar(con)
+        podadas = observabilidade.podar(con)
+        cob = observabilidade.cobertura_monitoramento(con)
+        return {"sondas": sond, "adapters": ad, "chamadas_podadas": podadas, "cobertura": cob["resumo"], "completa": cob["completa"],
+                "alertas": _alertar_cobertura(con, cob, **kw)}
+    if job["tipo"] == "enriquecer":
+        return {"datajud": motor.enriquecer_pendentes()}
     if job["tipo"] == "varrer_cadernos":
         from . import cadernos
         r = cadernos.varrer(con, motor, dias=int(p.get("dias", 3)))
         return {"execucao": r, **_pipeline_pos_execucao(con, r, ia, **kw)}
     if job["tipo"] == "verificar_controle":
         from . import cobertura
-        return {"controle": cobertura.verificar_controle(con, motor)}
+        r = cobertura.verificar_controle(con, motor)
+        if r.get("recuperado"):   # canário: processo conhecido que o DJEN nomeia e a pesquisa não tinha pego = regressão
+            notificacoes.emitir(con, {"tipo": "falha_consulta", "definitivo": False, "cliente": "(sistema)", "correspondencia_id": None,
+                                      "detalhe": "REGRESSÃO DE FONTE/PARSER: %d processo(s)-controle nomeados pelo DJEN não estavam na base. Investigar." % r["recuperado"]},
+                                "regressao:%s:%d" % (date.today().isoformat(), r["recuperado"]), **kw)
+        return {"controle": r}
     if job["tipo"] == "alertas":
         return {"alertas": notificacoes.processar_pendentes(con, **kw)}
     if job["tipo"] == "analisar":
@@ -146,14 +173,39 @@ def agendar(con: sqlite3.Connection, agora: Optional[datetime] = None) -> Dict[s
     if pend and not aberto and (not ult or datetime.fromisoformat(ult) <= agora - timedelta(minutes=cfg["reprocessar_a_cada_min"])):
         enfileirar(con, "reprocessar_falhas", {}, "agendador", agora)
         feito["reprocessar"] = True
+    rcfg = _config.obter(con, "radar")
+    fr = rcfg["frequencias_min"]
+
+    def vencido(tipo, minutos, so_origem=None):
+        aberto_ = con.execute("SELECT 1 FROM jobs WHERE tipo=? AND status IN ('na_fila','executando')", (tipo,)).fetchone()
+        ult_ = con.execute("SELECT max(criado_em) FROM jobs WHERE tipo=?" + (" AND origem=?" if so_origem else ""),
+                           (tipo, so_origem) if so_origem else (tipo,)).fetchone()[0]
+        return not aberto_ and (not ult_ or datetime.fromisoformat(ult_) <= agora - timedelta(minutes=minutos))
+    feito["saude_fontes"] = feito["djen_intradia"] = feito["enriquecer"] = feito["controle"] = False
+    try:
+        if vencido("saude_fontes", fr["saude_fontes"]):
+            enfileirar(con, "saude_fontes", {}, "agendador", agora); feito["saude_fontes"] = True
+        # DJEN: relê o dia corrente a cada ~30 min (depois da primeira pesquisa do dia), sem esperar o horário diário
+        ja_diario = con.execute("SELECT 1 FROM jobs WHERE origem='agendador' AND tipo='executar' AND date(criado_em)=?", (agora.date().isoformat(),)).fetchone()
+        if ja_diario and vencido("executar", fr["djen_intradia"], "intradia"):
+            enfileirar(con, "executar", {"desde": (agora.date() - timedelta(days=1)).isoformat()}, "intradia", agora); feito["djen_intradia"] = True
+        if con.execute("SELECT 1 FROM processos WHERE datajud_status IN ('pendente','falha') LIMIT 1").fetchone() and vencido("enriquecer", fr["datajud_enriquecer"]):
+            enfileirar(con, "enriquecer", {}, "agendador", agora); feito["enriquecer"] = True
+        if (agora.hour, agora.minute) >= (min(hh + 1, 23), mm) and con.execute("SELECT 1 FROM controle_processos LIMIT 1").fetchone() and \
+                not con.execute("SELECT 1 FROM jobs WHERE tipo='verificar_controle' AND date(criado_em)=?", (agora.date().isoformat(),)).fetchone():
+            enfileirar(con, "verificar_controle", {}, "agendador", agora); feito["controle"] = True
+    except Exception as e:
+        print("falha ao agendar jobs do radar:", e, flush=True)
     feito["cadernos"] = False
     try:
         aberto_c = con.execute("SELECT 1 FROM jobs WHERE tipo='varrer_cadernos' AND status IN ('na_fila','executando')").fetchone()
         ja_c = con.execute("SELECT 1 FROM jobs WHERE tipo='varrer_cadernos' AND origem='agendador' AND date(criado_em)=?", (agora.date().isoformat(),)).fetchone()
         ult_c = con.execute("SELECT max(criado_em) FROM jobs WHERE tipo='varrer_cadernos'").fetchone()[0]
-        abertos = con.execute("SELECT 1 FROM cadernos WHERE data>=? AND NOT (status='Sem comunicações' OR (status='Processado' AND total_lido=total_declarado))",
+        abertos = con.execute("SELECT 1 FROM cadernos WHERE data>=? AND NOT (status IN ('Sem comunicações','Sem caderno') OR (status='Processado' AND total_lido=total_declarado))",
                               ((agora.date() - timedelta(days=2)).isoformat(),)).fetchone()
-        primeira_vez = (agora.hour, agora.minute) >= (hh, mm) and not ja_c
+        h2, m2 = (int(x) for x in rcfg["cadernos_segunda_passada"].split(":"))
+        n_c = con.execute("SELECT count(*) FROM jobs WHERE tipo='varrer_cadernos' AND origem='agendador' AND date(criado_em)=?", (agora.date().isoformat(),)).fetchone()[0]
+        primeira_vez = ((agora.hour, agora.minute) >= (hh, mm) and not ja_c) or ((agora.hour, agora.minute) >= (h2, m2) and n_c < 2)
         refazer = abertos and (not ult_c or datetime.fromisoformat(ult_c) <= agora - timedelta(minutes=cfg["reprocessar_a_cada_min"]))
         if not aberto_c and (primeira_vez or refazer):
             enfileirar(con, "varrer_cadernos", {"dias": 3}, "agendador", agora)

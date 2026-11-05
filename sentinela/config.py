@@ -12,6 +12,11 @@ PADRAO = {
                    "valor_alto": 1000000.0, "valor_medio": 100000.0},
     "motor": {"dias_nova_distribuicao": 15, "limite_enriquecimento": 2000, "dias_busca_inicial": 90},
     "retencao": {"comunicacoes_dias": 730},
+    # Radar Judicial: fontes que DEVEM estar operando para a cobertura ser "completa", frescor máximo aceito e limiares de confiança
+    "radar": {"fontes_esperadas": ["DJEN_BUSCA", "DJEN_CADERNO", "DATAJUD"],
+              "frescor_horas": {"DJEN_BUSCA": 36, "DJEN_CADERNO": 36, "DATAJUD": 48, "CNPJ_REGISTRO": 720},
+              "confianca_auto": 90, "confianca_revisao": 70, "chamadas_dias_retencao": 60,
+              "frequencias_min": {"saude_fontes": 10, "djen_intradia": 30, "datajud_enriquecer": 60}, "cadernos_segunda_passada": "18:00"},
 }
 
 

@@ -88,12 +88,22 @@ def escanear_zip(caminho: str, filtro: Filtro):
     return total, achados
 
 
-def _processar(http, sigla: str, meio: str, dia: str, filtro: Filtro, baixar: Callable, pasta: str) -> Dict:
-    meta = http.requisitar("GET", URL_CADERNO % (sigla, dia, meio))
+def _processar(http, sigla: str, meio: str, dia: str, filtro: Filtro, baixar: Callable, pasta: str, anterior=None) -> Dict:
+    try:
+        meta = http.requisitar("GET", URL_CADERNO % (sigla, dia, meio))
+    except ErroFonte as e:
+        if e.status == 404:   # o CNJ não tem caderno nesse dia para esse tribunal (fim de semana/feriado/sem envio): fechado, não é erro
+            return {"sigla": sigla, "meio": meio, "data": dia, "status": "Sem caderno", "versao": None, "hash": None, "total_declarado": 0,
+                    "total_lido": 0, "achados": [], "erro": None}
+        raise
     out = {"sigla": sigla, "meio": meio, "data": dia, "status": meta.get("status"), "versao": meta.get("versao"),
            "hash": meta.get("hash"), "total_declarado": meta.get("total_comunicacoes"), "total_lido": 0, "achados": [], "erro": None}
     if meta.get("status") != "Processado":
         return out   # 'Sem comunicações' é fechado; os demais ('Em processamento', 'Não Processado') ficam pendentes
+    if anterior and anterior["status"] == "Processado" and anterior["total_lido"] == anterior["total_declarado"] \
+            and anterior["versao"] == meta.get("versao") and anterior["hash"] == meta.get("hash"):
+        out.update(total_lido=anterior["total_lido"], reuso=True)   # mesma versão já lida por inteiro: não baixa de novo
+        return out
     caminho = os.path.join(pasta, "%s-%s-%s.zip" % (sigla, meio, dia))
     try:
         baixar(meta["url"], caminho)
@@ -105,7 +115,7 @@ def _processar(http, sigla: str, meio: str, dia: str, filtro: Filtro, baixar: Ca
 
 
 def _fechado(r: Dict) -> bool:
-    if r["status"] == "Sem comunicações":
+    if r["status"] in ("Sem comunicações", "Sem caderno"):
         return True
     return r["status"] == "Processado" and r["erro"] is None and r["total_lido"] == r["total_declarado"]
 
@@ -123,10 +133,10 @@ def varrer(con, motor, dias: int = 3, hoje: Optional[date] = None, baixar: Calla
         dia = (hoje - timedelta(days=i)).isoformat()
         for sg in siglas:
             for meio in MEIOS:
-                ex = con.execute("SELECT status,total_declarado,total_lido,versao FROM cadernos WHERE sigla=? AND meio=? AND data=?", (sg, meio, dia)).fetchone()
-                fechado_antes = ex and (ex["status"] == "Sem comunicações" or (ex["status"] == "Processado" and ex["total_lido"] == ex["total_declarado"]))
-                if not fechado_antes or dia == hoje.isoformat():   # o caderno do dia corrente pode ganhar nova versão
-                    tarefas.append((sg, meio, dia, ex["versao"] if ex else None))
+                ex = con.execute("SELECT status,total_declarado,total_lido,versao,hash FROM cadernos WHERE sigla=? AND meio=? AND data=?", (sg, meio, dia)).fetchone()
+                fechado_antes = ex and (ex["status"] in ("Sem comunicações", "Sem caderno") or (ex["status"] == "Processado" and ex["total_lido"] == ex["total_declarado"]))
+                if not fechado_antes or dia >= (hoje - timedelta(days=1)).isoformat():   # hoje e ontem podem ganhar nova versão; versão igual não é baixada de novo
+                    tarefas.append((sg, meio, dia, dict(ex) if ex else None))
     exec_id = con.execute("INSERT INTO execucoes(gatilho,inicio) VALUES ('caderno',?)", (agora_iso(),)).lastrowid
     con.commit()
     filtro = Filtro(clientes)
@@ -134,12 +144,9 @@ def varrer(con, motor, dias: int = 3, hoje: Optional[date] = None, baixar: Calla
     pasta = tempfile.mkdtemp(prefix="cadernos_")
 
     def trabalhar(t):
-        sg, meio, dia, versao_antes = t
+        sg, meio, dia, anterior = t
         try:
-            r = _processar(http, sg, meio, dia, filtro, baixar, pasta)
-            if r["status"] == "Processado" and versao_antes is not None and r["versao"] == versao_antes and r["total_lido"] == r["total_declarado"]:
-                pass
-            return r
+            return _processar(http, sg, meio, dia, filtro, baixar, pasta, anterior)
         except (ErroFonte, OSError, ValueError, zipfile.BadZipFile) as e:
             return {"sigla": sg, "meio": meio, "data": dia, "status": "erro", "versao": None, "hash": None, "total_declarado": None,
                     "total_lido": 0, "achados": [], "erro": "%s: %s" % (type(e).__name__, e)}
@@ -154,6 +161,10 @@ def varrer(con, motor, dias: int = 3, hoje: Optional[date] = None, baixar: Calla
                 motor._persistir(exec_id, cli, [{"q": {"chave": "caderno:%s:%s" % (r["sigla"], r["meio"]), "param": "caderno", "valor": r["sigla"]},
                                                  "ini": r["data"], "fim": r["data"], "inicio": agora_iso(), "status": "ok",
                                                  "total": r["total_declarado"], "lidos": r["total_lido"], "erro": None, "achados": ach}])
+            if r.get("reuso"):
+                res["cadernos_processados"] += 1
+                res["comunicacoes_lidas"] += r["total_lido"]
+                continue
             status = r["status"] if _fechado(r) or r["status"] in ("Em processamento", "Não Processado", "erro") else "incompleto"
             con.execute("INSERT INTO cadernos(sigla,meio,data,status,versao,hash,total_declarado,total_lido,achados,erro,atualizado_em) "
                         "VALUES (?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(sigla,meio,data) DO UPDATE SET status=excluded.status,versao=excluded.versao,"
@@ -183,7 +194,7 @@ def resumo(con, dias: int = 7, hoje: Optional[date] = None) -> List[Dict]:
     for i in range(dias - 1, -1, -1):
         dia = (hoje - timedelta(days=i)).isoformat()
         rows = con.execute("SELECT status,total_declarado,total_lido,achados FROM cadernos WHERE data=?", (dia,)).fetchall()
-        fech = [r for r in rows if r["status"] == "Sem comunicações" or (r["status"] == "Processado" and r["total_lido"] == r["total_declarado"])]
+        fech = [r for r in rows if r["status"] in ("Sem comunicações", "Sem caderno") or (r["status"] == "Processado" and r["total_lido"] == r["total_declarado"])]
         out.append({"dia": dia, "cadernos": len(rows), "fechados": len(fech), "pendentes": sum(1 for r in rows if r["status"] in ("Em processamento", "Não Processado")),
                     "com_erro": sum(1 for r in rows if r["status"] in ("erro", "incompleto")),
                     "declaradas": sum(r["total_declarado"] or 0 for r in rows), "lidas": sum(r["total_lido"] or 0 for r in rows),

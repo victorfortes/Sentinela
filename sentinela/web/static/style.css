@@ -195,3 +195,8 @@ details.ajuda>*:not(summary){margin-left:18px;margin-right:18px}details.ajuda>ul
 .cres{font:11px var(--mono);padding:3px 8px;border-radius:4px;border:1px solid var(--line)}.cres.ok{color:var(--green);border-color:#69d6b03b}.cres.alerta{color:var(--amber2);border-color:#f0a32e55}.cres.info{color:var(--mut)}
 .ajuda-txt{line-height:1.7;font-size:14px;color:#b9c4d2}.ajuda-txt ul{margin:6px 0 14px;padding-left:20px}
 @media(max-width:760px){.cobcli{grid-template-columns:1fr}}
+
+.summarygrid.fontes{grid-template-columns:repeat(auto-fit,minmax(260px,1fr))}
+.summarygrid.fontes .est-HEALTHY strong{color:var(--green)}.summarygrid.fontes .est-DEGRADED strong{color:var(--amber2)}
+.summarygrid.fontes .est-DOWN strong{color:var(--red)}.summarygrid.fontes .est-UNKNOWN strong{color:var(--mut)}
+.summarygrid.fontes small{line-height:1.6;display:block}

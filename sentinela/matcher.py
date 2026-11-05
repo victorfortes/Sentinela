@@ -170,7 +170,7 @@ def avaliar(cliente: Dict, comunicacao: Dict) -> Optional[Dict]:
             return {"nivel": nivel_cnpj, "classificacao": "confirmada", "polo": "P", "nome_na_fonte": p["nome"],
                     "evidencia": ev(p, tipo, sim, nome_cli, {"regra": "CNPJ no texto + parte no polo passivo com nome compatível"})}
         if sim == 1.0 and tipo in ("razao_social", "fantasia"):
-            conf = bool(cliente.get("confirmar_por_nome_exato"))  # decisão explícita do escritório para nomes distintivos
+            conf = bool(cliente.get("confirmar_por_nome_exato")) and tipo == "razao_social"  # nome fantasia sozinho nunca auto-confirma
             return {"nivel": 3, "classificacao": "confirmada" if conf else "provavel", "polo": "P", "nome_na_fonte": p["nome"],
                     "evidencia": ev(p, tipo, sim, nome_cli, {"regra": ("nome idêntico no polo passivo; confirmação por nome habilitada para este cliente" if conf else "nome idêntico no polo passivo, sem CNPJ na fonte")})}
         if sim == 1.0:

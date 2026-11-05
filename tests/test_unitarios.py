@@ -36,9 +36,11 @@ class Base(unittest.TestCase):
 
     def motor(self, transporte_djen, transporte_dj=None):
         nd = lambda s: None
-        djen = ConectorDJEN(FonteHTTP("djen", 0, 3, 0, transporte=transporte_djen, dormir=nd, ao_resultado=self.cb))
+        from sentinela import observabilidade
+        aud = lambda d: observabilidade.registrar_chamada(self.con, self.lock, d)   # a trilha de auditoria funciona como em produção
+        djen = ConectorDJEN(FonteHTTP("djen", 0, 3, 0, transporte=transporte_djen, dormir=nd, ao_resultado=self.cb, ao_chamada=aud))
         dj = ConectorDataJud(FonteHTTP("datajud", 0, 2, 0, transporte=transporte_dj or (lambda *a: resp({"hits": {"hits": []}})),
-                                       dormir=nd, ao_resultado=self.cb))
+                                       dormir=nd, ao_resultado=self.cb, ao_chamada=aud))
         return Motor(self.con, djen, dj, hoje=date.today())
 
 

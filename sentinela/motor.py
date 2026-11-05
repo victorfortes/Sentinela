@@ -9,6 +9,7 @@ from typing import Dict, List, Optional
 from . import clientes as _clientes
 from . import cnpj as _cnpj
 from . import nomes as _nomes
+from . import radar as _radar
 from . import matcher
 from .conectores.djen import ConectorDJEN
 from .conectores.datajud import ConectorDataJud
@@ -19,6 +20,7 @@ ESTADO_AUTO = {"confirmada": "automatico", "provavel": "pendente", "inconclusiva
 CHUNK_DIAS = 3
 LOTE_DATAJUD = 50
 NOME_MIN_CARACTERES = 4      # nome mais curto que isso (ex.: "NB") não é pesquisado por nome: devolve milhares de homônimos e a fonte recusa
+COLETOR_DJEN = "djen-coletor 1.2 / matcher 3"
 RESCAN_DIAS = 7              # cada pesquisa diária relê os últimos 7 dias (publicações tardias no DJEN)
 FALHAS_SEGUIDAS_ABORTA = 3   # numa execução, após 3 janelas seguidas falhando na mesma consulta, as demais não são tentadas
 TENTATIVAS_REPROCESSO = 6    # depois disso, a consulta que continua falhando só é refeita uma vez por dia
@@ -178,7 +180,10 @@ class Motor:
         r = {"q": q, "ini": a.isoformat(), "fim": b.isoformat(), "inicio": agora_iso(), "achados": []}
         try:
             itens, total, trunc = self.djen.consultar(q["param"], q["valor"], r["ini"], r["fim"])
-            r.update(status="truncada" if trunc else "ok", total=total, lidos=len(itens), erro=None)
+            u = self.djen.http.ultima()
+            r.update(status="truncada" if trunc else "ok", total=total, lidos=len(itens), erro=None, http_status=u.get("http_status"),
+                     codigo_erro=None, hash_resposta=u.get("hash_resposta"),
+                     resultado="TRUNCATED" if trunc else ("ZERO_RESULTS" if not itens else "RESULTS"))
             for it in itens:
                 com = _normalizar_item(it)
                 if com["id"] in vistos or len(com["numero_processo"]) != 20:
@@ -188,17 +193,24 @@ class Motor:
                 if m:
                     r["achados"].append((com, m))
         except (ErroFonte, ValueError, KeyError, TypeError, AttributeError) as e:
-            r.update(status="falha", total=None, lidos=0, erro="%s: %s" % (type(e).__name__, e))
+            u = self.djen.http.ultima()
+            r.update(status="falha", total=None, lidos=0, erro="%s: %s" % (type(e).__name__, e), http_status=u.get("http_status"),
+                     codigo_erro=u.get("codigo") if u.get("codigo") != "SUCCESS" else "UNKNOWN_ERROR", hash_resposta=u.get("hash_resposta"),
+                     resultado="QUERY_FAILED")
         return r
 
     # ---------- persistência ----------
     def _persistir(self, exec_id: int, c: Dict, resultados: List[Dict]) -> Dict[str, int]:
         con, agora, cont = self.con, agora_iso(), {"novas": 0, "atualizadas": 0}
         for r in resultados:
-            con.execute("INSERT INTO consultas(execucao_id,cliente_id,fonte,chave,janela_inicio,janela_fim,status,total_fonte,"
-                        "itens_lidos,erro,iniciada_em,concluida_em) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
-                        (exec_id, c["id"], "djen", r["q"]["chave"], r["ini"], r["fim"], r["status"], r["total"], r["lidos"],
-                         r["erro"], r["inicio"], agora))
+            cons_id = con.execute("INSERT INTO consultas(execucao_id,cliente_id,fonte,chave,janela_inicio,janela_fim,status,total_fonte,"
+                                  "itens_lidos,erro,iniciada_em,concluida_em,resultado,http_status,codigo_erro,versao_coletor,hash_resposta) "
+                                  "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                                  (exec_id, c["id"], "djen", r["q"]["chave"], r["ini"], r["fim"], r["status"], r["total"], r["lidos"],
+                                   r["erro"], r["inicio"], agora, r.get("resultado") or ("QUERY_FAILED" if r["status"] == "falha" else ("ZERO_RESULTS" if not r["lidos"] else "RESULTS")),
+                                   r.get("http_status"), r.get("codigo_erro"), COLETOR_DJEN, r.get("hash_resposta"))).lastrowid
+            novas_antes = cont["novas"]
+            fonte_label = "DJEN_CADERNO" if r["q"].get("param") == "caderno" else "DJEN_BUSCA"
             for com, m in r["achados"]:
                 con.execute("INSERT OR IGNORE INTO comunicacoes(id,fonte,numero_processo,tribunal,tipo,data_disponibilizacao,classe,"
                             "orgao,link,texto,destinatarios,coletado_em) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
@@ -221,6 +233,7 @@ class Motor:
                                 (c["id"], pid, com["id"], m["nivel"], m["classificacao"], m["polo"], m["nome_na_fonte"], ev,
                                  "djen", ESTADO_AUTO[m["classificacao"]], agora, agora))
                     cont["novas"] += 1
+                    _radar.evento(con, pid, "PROCESS_FIRST_SEEN", c["id"], fonte_label, "primeiro registro deste processo para o cliente (%s)" % m["classificacao"])
                 elif ex["estado_validacao"] in ESTADO_AUTO.values() and (
                         RANK[m["classificacao"]] > RANK[ex["classificacao"]]
                         or ("numeroProcesso:" in (ex["evidencia"] or "") and not r["q"]["chave"].startswith("numeroProcesso:")
@@ -232,6 +245,12 @@ class Motor:
                     cont["atualizadas"] += 1
                 else:
                     con.execute("UPDATE correspondencias SET ultima_verificacao=? WHERE id=?", (agora, ex["id"]))
+                _radar.registrar_visto(con, pid, fonte_label, com["id"], c["id"])
+                _radar.registrar_partes(con, pid, com.get("destinatarios"), fonte_label)
+                _radar.registrar_campos(con, pid, {"classe": com.get("classe"), "orgao": com.get("orgao")}, fonte_label)
+                _radar.marcar_citacao(con, pid, c["id"], com.get("tipo"))
+                _radar.reconciliar_processo(con, pid)
+            con.execute("UPDATE consultas SET novos=? WHERE id=?", (cont["novas"] - novas_antes, cons_id))
         if resultados and all(r["status"] in ("ok", "truncada") for r in resultados):
             con.execute("UPDATE clientes SET ultima_verificacao=? WHERE id=?", (agora, c["id"]))
         con.commit()
@@ -295,6 +314,10 @@ class Motor:
                                     (d["data_ajuizamento"], d["grau"], d["sistema"], json.dumps(d["assuntos"], ensure_ascii=False),
                                      d["classe"], d["orgao"], agora, p["id"]))
                         res["ok"] += 1
+                        _radar.registrar_visto(con, p["id"], "DATAJUD", d.get("sistema") or "")
+                        _radar.registrar_campos(con, p["id"], {"data_ajuizamento": d["data_ajuizamento"], "classe": d["classe"], "orgao": d["orgao"],
+                                                               "grau": d["grau"], "sistema": d["sistema"]}, "DATAJUD")
+                        _radar.reconciliar_processo(con, p["id"])
                 con.commit()
         self.classificar_datas()
         con.commit()

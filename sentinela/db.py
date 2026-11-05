@@ -245,6 +245,82 @@ MIGRACOES = [
         PRIMARY KEY (sigla, meio, data)
     );
     """),
+    ("0010_auditoria_chamadas", """
+    ALTER TABLE consultas ADD COLUMN resultado TEXT;
+    ALTER TABLE consultas ADD COLUMN http_status INTEGER;
+    ALTER TABLE consultas ADD COLUMN codigo_erro TEXT;
+    ALTER TABLE consultas ADD COLUMN novos INTEGER;
+    ALTER TABLE consultas ADD COLUMN versao_coletor TEXT;
+    ALTER TABLE consultas ADD COLUMN hash_resposta TEXT;
+    CREATE TABLE fonte_chamadas (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        fonte TEXT NOT NULL,
+        tribunal TEXT,
+        quando TEXT NOT NULL,
+        metodo TEXT,
+        consulta TEXT,
+        http_status INTEGER,
+        latencia_ms INTEGER,
+        ok INTEGER NOT NULL,
+        final INTEGER NOT NULL DEFAULT 1,
+        codigo TEXT NOT NULL,
+        hash_resposta TEXT,
+        versao_coletor TEXT
+    );
+    CREATE INDEX idx_chamadas_fonte_quando ON fonte_chamadas(fonte, quando);
+    CREATE INDEX idx_chamadas_quando ON fonte_chamadas(quando);
+    """),
+    ("0011_radar_processos", """
+    CREATE TABLE processo_fontes (
+        processo_id INTEGER NOT NULL REFERENCES processos(id) ON DELETE CASCADE,
+        fonte TEXT NOT NULL,
+        identificador TEXT,
+        primeiro_visto TEXT NOT NULL,
+        ultimo_visto TEXT NOT NULL,
+        vezes INTEGER NOT NULL DEFAULT 1,
+        PRIMARY KEY (processo_id, fonte)
+    );
+    CREATE TABLE processo_eventos (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        processo_id INTEGER NOT NULL REFERENCES processos(id) ON DELETE CASCADE,
+        cliente_id INTEGER,
+        tipo TEXT NOT NULL,
+        fonte TEXT,
+        detalhe TEXT,
+        criado_em TEXT NOT NULL
+    );
+    CREATE INDEX idx_eventos_processo ON processo_eventos(processo_id, id);
+    CREATE TABLE processo_partes (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        processo_id INTEGER NOT NULL REFERENCES processos(id) ON DELETE CASCADE,
+        nome TEXT NOT NULL,
+        nome_norm TEXT NOT NULL,
+        lado TEXT NOT NULL,
+        fonte TEXT NOT NULL,
+        UNIQUE (processo_id, nome_norm, lado)
+    );
+    CREATE TABLE processo_campos (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        processo_id INTEGER NOT NULL REFERENCES processos(id) ON DELETE CASCADE,
+        campo TEXT NOT NULL,
+        valor TEXT NOT NULL,
+        fonte TEXT NOT NULL,
+        observado_em TEXT NOT NULL,
+        UNIQUE (processo_id, campo, fonte, valor)
+    );
+    ALTER TABLE correspondencias ADD COLUMN confianca INTEGER;
+    ALTER TABLE correspondencias ADD COLUMN status_deteccao TEXT;
+    ALTER TABLE correspondencias ADD COLUMN citacao_confirmada INTEGER NOT NULL DEFAULT 0;
+    CREATE TABLE adapter_saude (
+        court TEXT PRIMARY KEY,
+        family TEXT,
+        status TEXT NOT NULL,
+        detalhe TEXT,
+        http_status INTEGER,
+        parser_version TEXT,
+        verificado_em TEXT NOT NULL
+    );
+    """),
 ]
 
 
